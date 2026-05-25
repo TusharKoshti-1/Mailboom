@@ -142,3 +142,6 @@ mailblast-pro/
 ## License
 
 MIT — use freely for legitimate email marketing with proper consent.
+
+seov mbgy aorw ecor
+
