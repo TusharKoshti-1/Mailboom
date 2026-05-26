@@ -8,13 +8,25 @@ const onFocus = e => e.target.style.borderColor = "var(--accent)";
 const onBlur  = e => e.target.style.borderColor = "var(--border)";
 
 const S = {
-  label: { display:"block", fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--text3)", marginBottom:6 },
-  input: { width:"100%", padding:"9px 12px", background:"var(--surface2)", border:"1px solid var(--border)", borderRadius:"var(--radius)", color:"var(--text)", fontFamily:"var(--font-mono)", fontSize:13, outline:"none", transition:"border-color 0.15s", boxSizing:"border-box" },
-  textarea: { width:"100%", padding:"10px 12px", background:"var(--surface2)", border:"1px solid var(--border)", borderRadius:"var(--radius)", color:"var(--text)", fontFamily:"var(--font-mono)", fontSize:13, outline:"none", resize:"vertical", lineHeight:1.65, transition:"border-color 0.15s", boxSizing:"border-box" },
-  btnPrimary: { display:"flex", alignItems:"center", justifyContent:"center", gap:8, padding:"11px 24px", background:"var(--accent)", color:"var(--bg)", border:"none", borderRadius:"var(--radius)", cursor:"pointer", fontFamily:"var(--font-display)", fontWeight:700, fontSize:14, transition:"all 0.15s", whiteSpace:"nowrap" },
+  label:        { display:"block", fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--text3)", marginBottom:6 },
+  input:        { width:"100%", padding:"9px 12px", background:"var(--surface2)", border:"1px solid var(--border)", borderRadius:"var(--radius)", color:"var(--text)", fontFamily:"var(--font-mono)", fontSize:13, outline:"none", transition:"border-color 0.15s", boxSizing:"border-box" },
+  select:       { width:"100%", padding:"9px 12px", background:"var(--surface2)", border:"1px solid var(--border)", borderRadius:"var(--radius)", color:"var(--text)", fontFamily:"var(--font-mono)", fontSize:13, outline:"none", transition:"border-color 0.15s", boxSizing:"border-box", cursor:"pointer" },
+  textarea:     { width:"100%", padding:"10px 12px", background:"var(--surface2)", border:"1px solid var(--border)", borderRadius:"var(--radius)", color:"var(--text)", fontFamily:"var(--font-mono)", fontSize:13, outline:"none", resize:"vertical", lineHeight:1.65, transition:"border-color 0.15s", boxSizing:"border-box" },
+  btnPrimary:   { display:"flex", alignItems:"center", justifyContent:"center", gap:8, padding:"11px 24px", background:"var(--accent)", color:"var(--bg)", border:"none", borderRadius:"var(--radius)", cursor:"pointer", fontFamily:"var(--font-display)", fontWeight:700, fontSize:14, transition:"all 0.15s", whiteSpace:"nowrap" },
   btnSecondary: { display:"flex", alignItems:"center", justifyContent:"center", gap:6, padding:"9px 16px", background:"transparent", color:"var(--text2)", border:"1px solid var(--border2)", borderRadius:"var(--radius)", cursor:"pointer", fontFamily:"var(--font-display)", fontWeight:500, fontSize:13, transition:"all 0.15s" },
-  chip: { display:"inline-flex", alignItems:"center", gap:4, padding:"2px 8px", borderRadius:100, fontSize:11, fontWeight:500, fontFamily:"var(--font-mono)" },
-  divider: { height:1, background:"var(--border)", margin:"14px 0" },
+  chip:         { display:"inline-flex", alignItems:"center", gap:4, padding:"2px 8px", borderRadius:100, fontSize:11, fontWeight:500, fontFamily:"var(--font-mono)" },
+  divider:      { height:1, background:"var(--border)", margin:"14px 0" },
+};
+
+// SMTP presets — Hostinger is default
+const PRESETS = {
+  hostinger: { label:"Hostinger",          host:"smtp.hostinger.com",        port:"587" },
+  gmail:     { label:"Gmail",              host:"smtp.gmail.com",             port:"587" },
+  outlook:   { label:"Outlook / Hotmail",  host:"smtp-mail.outlook.com",      port:"587" },
+  yahoo:     { label:"Yahoo Mail",         host:"smtp.mail.yahoo.com",        port:"587" },
+  sendgrid:  { label:"SendGrid (SMTP)",    host:"smtp.sendgrid.net",          port:"587" },
+  mailgun:   { label:"Mailgun",            host:"smtp.mailgun.org",           port:"587" },
+  custom:    { label:"Custom SMTP",        host:"",                           port:"587" },
 };
 
 function Field({ label, children }) {
@@ -75,9 +87,15 @@ function FileChip({ file, onRemove }) {
 }
 
 export default function App() {
-  const [apiKey,    setApiKey]    = useState("");
+  // SMTP config
+  const [preset,   setPreset]   = useState("hostinger");
+  const [smtpHost, setSmtpHost] = useState(PRESETS.hostinger.host);
+  const [smtpPort, setSmtpPort] = useState(PRESETS.hostinger.port);
+  const [smtpUser, setSmtpUser] = useState("");
+  const [smtpPass, setSmtpPass] = useState("");
+
+  // Sender + compose
   const [fromName,  setFromName]  = useState("");
-  const [fromEmail, setFromEmail] = useState("");
   const [to,        setTo]        = useState("");
   const [subject,   setSubject]   = useState("");
   const [body,      setBody]      = useState("");
@@ -85,6 +103,7 @@ export default function App() {
   const [attachments, setAttachments] = useState([]);
   const fileRef = useRef();
 
+  // UI state
   const [testing,    setTesting]    = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [sending,    setSending]    = useState(false);
@@ -93,16 +112,29 @@ export default function App() {
   const logEndRef = useRef();
 
   useEffect(() => { logEndRef.current?.scrollIntoView({ behavior:"smooth" }); }, [logs]);
+
   const addLog = (level, msg) =>
     setLogs(p => [...p, { level, msg, time: new Date().toLocaleTimeString("en-US", { hour12:false }) }]);
 
+  // When preset changes, auto-fill host & port
+  const handlePreset = (key) => {
+    setPreset(key);
+    setSmtpHost(PRESETS[key].host);
+    setSmtpPort(PRESETS[key].port);
+    setTestResult(null);
+  };
+
+  const smtpPayload = () => ({ smtpHost, smtpPort, smtpUser, smtpPass });
+
+  // Test SMTP connection
   const handleTest = async () => {
-    if (!apiKey) return addLog("error", "❌ Enter your SendGrid API key first.");
+    if (!smtpHost || !smtpUser || !smtpPass)
+      return addLog("error", "❌ Fill in SMTP host, username and password first.");
     setTesting(true); setTestResult(null);
     try {
       const res  = await fetch("/api/test-connection", {
         method:"POST", headers:{ "Content-Type":"application/json" },
-        body: JSON.stringify({ apiKey }),
+        body: JSON.stringify(smtpPayload()),
       });
       const data = await res.json();
       setTestResult(data);
@@ -114,9 +146,10 @@ export default function App() {
     setTesting(false);
   };
 
+  // Send email
   const handleSend = async () => {
-    if (!apiKey)    return addLog("error", "❌ Enter your SendGrid API key.");
-    if (!fromEmail) return addLog("error", "❌ Enter a From email address.");
+    if (!smtpHost || !smtpUser || !smtpPass) return addLog("error", "❌ Fill in SMTP credentials.");
+    
     if (!to)        return addLog("error", "❌ Enter a recipient (To) address.");
     if (!subject)   return addLog("error", "❌ Enter a subject line.");
     if (!body)      return addLog("error", "❌ Write a message body.");
@@ -125,9 +158,9 @@ export default function App() {
     addLog("info", `📤 Sending to ${to}...`);
 
     const fd = new FormData();
-    fd.append("apiKey",    apiKey);
+    Object.entries(smtpPayload()).forEach(([k, v]) => fd.append(k, v));
     fd.append("fromName",  fromName);
-    fd.append("fromEmail", fromEmail);
+    fd.append("fromEmail", smtpUser);
     fd.append("to",        to);
     fd.append("subject",   subject);
     fd.append("body",      body);
@@ -151,69 +184,98 @@ export default function App() {
   };
 
   const addFiles = files => {
-    const ex = new Set(attachments.map(f => f.name+f.size));
-    setAttachments(p => [...p, ...Array.from(files).filter(f => !ex.has(f.name+f.size))]);
+    const ex = new Set(attachments.map(f => f.name + f.size));
+    setAttachments(p => [...p, ...Array.from(files).filter(f => !ex.has(f.name + f.size))]);
   };
 
   return (
     <div style={{ display:"flex", flexDirection:"column", minHeight:"100vh", background:"var(--bg)", fontFamily:"var(--font-display)" }}>
 
-      {/* Header */}
+      {/* ── Header ── */}
       <header style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"16px 28px", borderBottom:"1px solid var(--border)", background:"rgba(8,11,15,0.97)", backdropFilter:"blur(12px)", position:"sticky", top:0, zIndex:100 }}>
         <div style={{ display:"flex", alignItems:"center", gap:10, fontWeight:800, fontSize:20, letterSpacing:"-0.5px" }}>
           <div style={{ width:32, height:32, background:"var(--accent)", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", color:"var(--bg)" }}>
             <Zap size={17}/>
           </div>
           MailSend
-          <span style={{ fontSize:10, fontFamily:"var(--font-mono)", padding:"2px 7px", background:"var(--accent-dim)", color:"var(--accent)", borderRadius:100, border:"1px solid rgba(0,229,255,0.3)", letterSpacing:"0.05em", marginLeft:4 }}>v1</span>
+          <span style={{ fontSize:10, fontFamily:"var(--font-mono)", padding:"2px 7px", background:"var(--accent-dim)", color:"var(--accent)", borderRadius:100, border:"1px solid rgba(0,229,255,0.3)", letterSpacing:"0.05em", marginLeft:4 }}>v2</span>
         </div>
         <div style={{ display:"flex", alignItems:"center", gap:7, fontSize:12, color:"var(--text3)", fontFamily:"var(--font-mono)" }}>
-          <div style={{ width:7, height:7, borderRadius:"50%", background: testResult?.ok ? "var(--green)" : testResult?.ok===false ? "var(--red)" : "var(--text3)", boxShadow: testResult?.ok ? "0 0 8px var(--green)" : "none", transition:"all 0.3s" }}/>
+          <div style={{ width:7, height:7, borderRadius:"50%",
+            background:  testResult?.ok ? "var(--green)" : testResult?.ok===false ? "var(--red)" : "var(--text3)",
+            boxShadow:   testResult?.ok ? "0 0 8px var(--green)" : "none",
+            transition:  "all 0.3s" }}/>
           {testResult?.ok ? "CONNECTED" : testResult?.ok===false ? "FAILED" : "NOT TESTED"}
         </div>
       </header>
 
       <div style={{ flex:1, display:"flex", minHeight:0 }}>
 
-        {/* Sidebar */}
-        <div style={{ width:300, borderRight:"1px solid var(--border)", background:"var(--surface)", display:"flex", flexDirection:"column", overflowY:"auto", flexShrink:0 }}>
+        {/* ── Sidebar ── */}
+        <div style={{ width:310, borderRight:"1px solid var(--border)", background:"var(--surface)", display:"flex", flexDirection:"column", overflowY:"auto", flexShrink:0 }}>
 
-          {/* SendGrid Setup */}
+          {/* SMTP Setup */}
           <div style={{ padding:"16px 18px", borderBottom:"1px solid var(--border)" }}>
             <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:14 }}>
               <Settings2 size={14} color="var(--accent)"/>
-              <span style={{ fontWeight:600, fontSize:13 }}>SendGrid Setup</span>
+              <span style={{ fontWeight:600, fontSize:13 }}>SMTP Setup</span>
             </div>
 
-            {/* Step-by-step guide */}
-            <div style={{ background:"rgba(0,229,255,0.06)", border:"1px solid rgba(0,229,255,0.15)", borderRadius:"var(--radius)", padding:"11px 13px", marginBottom:14, fontSize:12, lineHeight:1.7, color:"var(--text2)" }}>
-              <div style={{ fontWeight:700, color:"var(--accent)", marginBottom:6, fontSize:11, letterSpacing:"0.06em", textTransform:"uppercase" }}>Quick Setup (free — 100 emails/day)</div>
-              <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
-                {[
-                  ["1", "Go to", "sendgrid.com", "https://sendgrid.com"],
-                  ["2", "Sign up for a free account", null, null],
-                  ["3", "Settings → API Keys → Create API Key", null, null],
-                  ["4", "Choose Full Access → Create & View", null, null],
-                  ["5", "Paste the key below", null, null],
-                  ["6", "Verify your sender email in SendGrid", null, null],
-                ].map(([n, text, link, href]) => (
-                  <div key={n} style={{ display:"flex", gap:8 }}>
-                    <span style={{ background:"var(--accent-dim)", color:"var(--accent)", borderRadius:4, width:18, height:18, display:"flex", alignItems:"center", justifyContent:"center", fontSize:10, fontWeight:700, flexShrink:0, marginTop:1 }}>{n}</span>
-                    <span>{text}{link && <> <a href={href} target="_blank" rel="noreferrer" style={{ color:"var(--accent)" }}>{link}</a></>}</span>
-                  </div>
+            {/* Provider preset */}
+            <Field label="Email Provider">
+              <select value={preset} onChange={e => handlePreset(e.target.value)}
+                style={S.select} onFocus={onFocus} onBlur={onBlur}>
+                {Object.entries(PRESETS).map(([key, p]) => (
+                  <option key={key} value={key}>{p.label}</option>
                 ))}
+              </select>
+            </Field>
+
+            {/* Hostinger tip */}
+            {preset === "hostinger" && (
+              <div style={{ background:"rgba(0,229,255,0.06)", border:"1px solid rgba(0,229,255,0.15)", borderRadius:"var(--radius)", padding:"10px 12px", marginBottom:14, fontSize:12, lineHeight:1.8, color:"var(--text2)" }}>
+                <div style={{ fontWeight:700, color:"var(--accent)", marginBottom:4, fontSize:11, letterSpacing:"0.06em", textTransform:"uppercase" }}>Hostinger Setup</div>
+                <div>① Username = your full domain email</div>
+                <div>② Password = Hostinger email password</div>
+                <div>③ From Email = same as username</div>
+              </div>
+            )}
+
+            {/* Gmail tip */}
+            {preset === "gmail" && (
+              <div style={{ background:"rgba(0,229,255,0.06)", border:"1px solid rgba(0,229,255,0.15)", borderRadius:"var(--radius)", padding:"10px 12px", marginBottom:14, fontSize:12, lineHeight:1.8, color:"var(--text2)" }}>
+                <div style={{ fontWeight:700, color:"var(--accent)", marginBottom:4, fontSize:11, letterSpacing:"0.06em", textTransform:"uppercase" }}>Gmail Setup</div>
+                <div>① Enable 2-Step Verification in Google</div>
+                <div>② Go to Google Account → App Passwords</div>
+                <div>③ Create app password → use it here</div>
+              </div>
+            )}
+
+            {/* Host + Port row */}
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 76px", gap:8, marginBottom:14 }}>
+              <div>
+                <label style={S.label}>SMTP Host</label>
+                <input value={smtpHost} onChange={e => setSmtpHost(e.target.value)}
+                  placeholder="smtp.hostinger.com" style={S.input} onFocus={onFocus} onBlur={onBlur}/>
+              </div>
+              <div>
+                <label style={S.label}>Port</label>
+                <input value={smtpPort} onChange={e => setSmtpPort(e.target.value)}
+                  placeholder="587" style={S.input} onFocus={onFocus} onBlur={onBlur}/>
               </div>
             </div>
 
-            <TextInput label="SendGrid API Key" type="password" value={apiKey} onChange={setApiKey} placeholder="SG.xxxxxxxxxxxxxxxxxx"/>
+            <TextInput label="Username" value={smtpUser} onChange={setSmtpUser}
+              placeholder="you@yourdomain.com"/>
+            <TextInput label="Password" type="password" value={smtpPass} onChange={setSmtpPass}
+              placeholder="Your email password"/>
 
             <div style={S.divider}/>
-            <label style={S.label}>Sender Identity</label>
+            <label style={S.label}>Display Name (optional)</label>
             <div style={{ fontSize:11, color:"var(--text3)", marginBottom:8, lineHeight:1.5 }}>
-              Must match a verified sender in your SendGrid account.
+              Emails will be sent <strong style={{color:"var(--accent)"}}>from</strong> your username above.
             </div>
-            <TextInput placeholder="Display Name (optional)" value={fromName} onChange={setFromName} mono={false}/>
-            <TextInput placeholder="verified@yourdomain.com" value={fromEmail} onChange={setFromEmail}/>
+            <TextInput placeholder="e.g. Tushar from Prishi Enterprise" value={fromName} onChange={setFromName} mono={false}/>
 
             {/* Test button */}
             <button onClick={handleTest} disabled={testing}
@@ -221,15 +283,17 @@ export default function App() {
                 borderColor: testResult?.ok ? "var(--green)" : testResult?.ok===false ? "var(--red)" : "var(--border2)",
                 color:       testResult?.ok ? "var(--green)" : testResult?.ok===false ? "var(--red)" : "var(--text2)",
               }}
-              onMouseEnter={e => !testing && (e.currentTarget.style.borderColor="var(--accent)")}
+              onMouseEnter={e => !testing && (e.currentTarget.style.borderColor = "var(--accent)")}
               onMouseLeave={e => !testing && (e.currentTarget.style.borderColor = testResult?.ok ? "var(--green)" : testResult?.ok===false ? "var(--red)" : "var(--border2)")}>
               {testing
-                ? <><Loader2 size={13} style={{ animation:"spin 1s linear infinite" }}/> Verifying...</>
-                : <><Wifi size={13}/> Verify API Key</>}
+                ? <><Loader2 size={13} style={{ animation:"spin 1s linear infinite" }}/> Testing...</>
+                : <><Wifi size={13}/> Test Connection</>}
             </button>
 
             {testResult && (
-              <div style={{ marginTop:9, padding:"8px 11px", borderRadius:"var(--radius)", fontSize:12, fontFamily:"var(--font-mono)", lineHeight:1.5, background: testResult.ok ? "var(--green-dim)" : "var(--red-dim)", color: testResult.ok ? "var(--green)" : "var(--red)" }}>
+              <div style={{ marginTop:9, padding:"8px 11px", borderRadius:"var(--radius)", fontSize:12, fontFamily:"var(--font-mono)", lineHeight:1.5,
+                background: testResult.ok ? "var(--green-dim)" : "var(--red-dim)",
+                color:      testResult.ok ? "var(--green)"     : "var(--red)" }}>
                 {testResult.message}
               </div>
             )}
@@ -257,12 +321,15 @@ export default function App() {
               <div style={{ fontSize:12 }}>Drop files or click to browse</div>
               <div style={{ fontSize:10, marginTop:3 }}>PDF, images, docs — max 25MB</div>
             </div>
-            <input ref={fileRef} type="file" multiple style={{ display:"none" }} onChange={e => { addFiles(e.target.files); e.target.value=""; }}/>
-            {attachments.map(f => <FileChip key={f.name+f.size} file={f} onRemove={r => setAttachments(p => p.filter(x => x!==r))}/>)}
+            <input ref={fileRef} type="file" multiple style={{ display:"none" }}
+              onChange={e => { addFiles(e.target.files); e.target.value=""; }}/>
+            {attachments.map(f => (
+              <FileChip key={f.name+f.size} file={f} onRemove={r => setAttachments(p => p.filter(x => x !== r))}/>
+            ))}
           </div>
         </div>
 
-        {/* Compose + Log */}
+        {/* ── Compose + Log ── */}
         <div style={{ flex:1, display:"flex", flexDirection:"column", minHeight:0 }}>
 
           {/* Compose */}
@@ -278,14 +345,17 @@ export default function App() {
             <Field label="Message Body">
               <textarea
                 value={body} onChange={e => setBody(e.target.value)}
-                placeholder={isHtml ? "<p>Hello,</p>\n<p>Your message here...</p>" : "Hello,\n\nYour message here...\n\nBest regards"}
+                placeholder={isHtml
+                  ? "<p>Hello,</p>\n<p>Your message here...</p>"
+                  : "Hello,\n\nYour message here...\n\nBest regards"}
                 style={{ ...S.textarea, minHeight:220 }}
                 onFocus={onFocus} onBlur={onBlur}
               />
             </Field>
 
             <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", marginTop:-6 }}>
-              <input type="checkbox" checked={isHtml} onChange={e => setIsHtml(e.target.checked)} style={{ accentColor:"var(--accent)" }}/>
+              <input type="checkbox" checked={isHtml} onChange={e => setIsHtml(e.target.checked)}
+                style={{ accentColor:"var(--accent)" }}/>
               <span style={{ fontSize:12, color:"var(--text2)" }}>Send as HTML</span>
               {isHtml && <span style={{ ...S.chip, background:"var(--accent-dim)", color:"var(--accent)" }}>HTML mode</span>}
             </label>
@@ -325,7 +395,7 @@ export default function App() {
             <div style={{ flex:1, overflow:"auto", fontFamily:"var(--font-mono)", fontSize:12, paddingTop:4, paddingBottom:4, minHeight:0 }}>
               {logs.length === 0 && (
                 <div style={{ padding:"28px 18px", textAlign:"center", color:"var(--text3)", fontSize:12 }}>
-                  Verify your API key, then send — activity shows here.
+                  Test your connection, then send — activity shows here.
                 </div>
               )}
               {logs.map((log, i) => <LogLine key={i} log={log}/>)}
