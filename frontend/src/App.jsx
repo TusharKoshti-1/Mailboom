@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import {
   Zap, Settings2, Mail, Paperclip, Send, Wifi, Eye, EyeOff,
-  X, Upload, Loader2, CheckCircle, AlertCircle, Terminal, RefreshCw,
+  X, Upload, Loader2, CheckCircle, AlertCircle, Terminal, RefreshCw, Clock, Users,
 } from "lucide-react";
 
 const onFocus = e => e.target.style.borderColor = "var(--accent)";
@@ -18,15 +18,14 @@ const S = {
   divider:      { height:1, background:"var(--border)", margin:"14px 0" },
 };
 
-// SMTP presets — Hostinger is default
 const PRESETS = {
-  hostinger: { label:"Hostinger",          host:"smtp.hostinger.com",        port:"587" },
-  gmail:     { label:"Gmail",              host:"smtp.gmail.com",             port:"587" },
-  outlook:   { label:"Outlook / Hotmail",  host:"smtp-mail.outlook.com",      port:"587" },
-  yahoo:     { label:"Yahoo Mail",         host:"smtp.mail.yahoo.com",        port:"587" },
-  sendgrid:  { label:"SendGrid (SMTP)",    host:"smtp.sendgrid.net",          port:"587" },
-  mailgun:   { label:"Mailgun",            host:"smtp.mailgun.org",           port:"587" },
-  custom:    { label:"Custom SMTP",        host:"",                           port:"587" },
+  hostinger: { label:"Hostinger",         host:"smtp.hostinger.com",     port:"587" },
+  gmail:     { label:"Gmail",             host:"smtp.gmail.com",          port:"587" },
+  outlook:   { label:"Outlook / Hotmail", host:"smtp-mail.outlook.com",   port:"587" },
+  yahoo:     { label:"Yahoo Mail",        host:"smtp.mail.yahoo.com",     port:"587" },
+  sendgrid:  { label:"SendGrid (SMTP)",   host:"smtp.sendgrid.net",       port:"587" },
+  mailgun:   { label:"Mailgun",           host:"smtp.mailgun.org",        port:"587" },
+  custom:    { label:"Custom SMTP",       host:"",                        port:"587" },
 };
 
 function Field({ label, children }) {
@@ -86,28 +85,35 @@ function FileChip({ file, onRemove }) {
   );
 }
 
+// Parse emails from textarea — split by newline or comma
+function parseEmails(raw) {
+  return raw.split(/[\n,]+/).map(e => e.trim()).filter(e => e.includes("@"));
+}
+
 export default function App() {
-  // SMTP config
   const [preset,   setPreset]   = useState("hostinger");
   const [smtpHost, setSmtpHost] = useState(PRESETS.hostinger.host);
   const [smtpPort, setSmtpPort] = useState(PRESETS.hostinger.port);
   const [smtpUser, setSmtpUser] = useState("");
   const [smtpPass, setSmtpPass] = useState("");
+  const [fromName, setFromName] = useState("");
 
-  // Sender + compose
-  const [fromName,  setFromName]  = useState("");
-  const [to,        setTo]        = useState("");
-  const [subject,   setSubject]   = useState("");
-  const [body,      setBody]      = useState("");
-  const [isHtml,    setIsHtml]    = useState(false);
+  const [to,      setTo]      = useState("");
+  const [subject, setSubject] = useState("");
+  const [body,    setBody]    = useState("");
+  const [isHtml,  setIsHtml]  = useState(false);
+
+  // Delay settings
+  const [minDelay, setMinDelay] = useState("30");
+  const [maxDelay, setMaxDelay] = useState("60");
+
   const [attachments, setAttachments] = useState([]);
   const fileRef = useRef();
 
-  // UI state
   const [testing,    setTesting]    = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [sending,    setSending]    = useState(false);
-  const [sendResult, setSendResult] = useState(null);
+  const [progress,   setProgress]   = useState(null); // { current, total, results[] }
   const [logs,       setLogs]       = useState([]);
   const logEndRef = useRef();
 
@@ -116,7 +122,6 @@ export default function App() {
   const addLog = (level, msg) =>
     setLogs(p => [...p, { level, msg, time: new Date().toLocaleTimeString("en-US", { hour12:false }) }]);
 
-  // When preset changes, auto-fill host & port
   const handlePreset = (key) => {
     setPreset(key);
     setSmtpHost(PRESETS[key].host);
@@ -126,7 +131,6 @@ export default function App() {
 
   const smtpPayload = () => ({ smtpHost, smtpPort, smtpUser, smtpPass });
 
-  // Test SMTP connection
   const handleTest = async () => {
     if (!smtpHost || !smtpUser || !smtpPass)
       return addLog("error", "❌ Fill in SMTP host, username and password first.");
@@ -146,41 +150,74 @@ export default function App() {
     setTesting(false);
   };
 
-  // Send email
+  const recipientList = parseEmails(to);
+  const isBulk = recipientList.length > 1;
+
   const handleSend = async () => {
     if (!smtpHost || !smtpUser || !smtpPass) return addLog("error", "❌ Fill in SMTP credentials.");
-    
-    if (!to)        return addLog("error", "❌ Enter a recipient (To) address.");
-    if (!subject)   return addLog("error", "❌ Enter a subject line.");
-    if (!body)      return addLog("error", "❌ Write a message body.");
+    if (!to)      return addLog("error", "❌ Enter at least one recipient.");
+    if (!subject) return addLog("error", "❌ Enter a subject line.");
+    if (!body)    return addLog("error", "❌ Write a message body.");
+    if (recipientList.length === 0) return addLog("error", "❌ No valid email addresses found.");
 
-    setSending(true); setSendResult(null);
-    addLog("info", `📤 Sending to ${to}...`);
+    const min = parseFloat(minDelay) || 30;
+    const max = parseFloat(maxDelay) || 60;
+    if (min > max) return addLog("error", "❌ Min delay cannot be greater than max delay.");
+
+    setSending(true);
+    setProgress({ current:0, total: recipientList.length, results:[] });
+
+    if (isBulk) {
+      addLog("info", `📋 Starting bulk send to ${recipientList.length} recipients (delay: ${min}–${max}s random)...`);
+    } else {
+      addLog("info", `📤 Sending to ${recipientList[0]}...`);
+    }
 
     const fd = new FormData();
     Object.entries(smtpPayload()).forEach(([k, v]) => fd.append(k, v));
-    fd.append("fromName",  fromName);
-    fd.append("fromEmail", smtpUser);
-    fd.append("to",        to);
-    fd.append("subject",   subject);
-    fd.append("body",      body);
-    fd.append("isHtml",    isHtml);
+    fd.append("fromName", fromName);
+    fd.append("to",       to);
+    fd.append("subject",  subject);
+    fd.append("body",     body);
+    fd.append("isHtml",   isHtml);
+    fd.append("minDelay", min);
+    fd.append("maxDelay", max);
     attachments.forEach(f => fd.append("attachments", f));
 
     try {
       const res  = await fetch("/api/send", { method:"POST", body:fd });
       const data = await res.json();
-      setSendResult(data);
-      if (data.ok) {
-        addLog("success", `✅ ${data.message}`);
-        setTo(""); setSubject(""); setBody(""); setAttachments([]);
+
+      if (data.results) {
+        // Bulk result — log each one
+        data.results.forEach((r, i) => {
+          setProgress(p => ({ ...p, current: i+1, results: [...(p?.results||[]), r] }));
+          if (r.ok) {
+            addLog("success", `✅ (${i+1}/${data.total}) ${r.email} — sent`);
+          } else {
+            addLog("error",   `❌ (${i+1}/${data.total}) ${r.email} — ${r.message}`);
+          }
+        });
+        addLog(
+          data.failed === 0 ? "success" : "warn",
+          `📊 Done — ${data.success} sent, ${data.failed} failed out of ${data.total}`
+        );
+        if (data.success > 0) { setTo(""); setSubject(""); setBody(""); setAttachments([]); }
       } else {
-        addLog("error", `❌ ${data.message}`);
+        // Single fallback
+        if (data.ok) {
+          addLog("success", `✅ ${data.message}`);
+          setTo(""); setSubject(""); setBody(""); setAttachments([]);
+        } else {
+          addLog("error", `❌ ${data.message}`);
+        }
       }
     } catch (err) {
       addLog("error", `❌ Network error: ${err.message}`);
     }
+
     setSending(false);
+    setProgress(null);
   };
 
   const addFiles = files => {
@@ -188,106 +225,89 @@ export default function App() {
     setAttachments(p => [...p, ...Array.from(files).filter(f => !ex.has(f.name + f.size))]);
   };
 
+  // Estimated time for bulk
+  const estimatedMin = Math.round(recipientList.length > 1 ? (recipientList.length - 1) * parseFloat(minDelay||30) : 0);
+  const estimatedMax = Math.round(recipientList.length > 1 ? (recipientList.length - 1) * parseFloat(maxDelay||60) : 0);
+
   return (
     <div style={{ display:"flex", flexDirection:"column", minHeight:"100vh", background:"var(--bg)", fontFamily:"var(--font-display)" }}>
 
-      {/* ── Header ── */}
+      {/* Header */}
       <header style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"16px 28px", borderBottom:"1px solid var(--border)", background:"rgba(8,11,15,0.97)", backdropFilter:"blur(12px)", position:"sticky", top:0, zIndex:100 }}>
         <div style={{ display:"flex", alignItems:"center", gap:10, fontWeight:800, fontSize:20, letterSpacing:"-0.5px" }}>
           <div style={{ width:32, height:32, background:"var(--accent)", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", color:"var(--bg)" }}>
             <Zap size={17}/>
           </div>
           MailSend
-          <span style={{ fontSize:10, fontFamily:"var(--font-mono)", padding:"2px 7px", background:"var(--accent-dim)", color:"var(--accent)", borderRadius:100, border:"1px solid rgba(0,229,255,0.3)", letterSpacing:"0.05em", marginLeft:4 }}>v2</span>
+          <span style={{ fontSize:10, fontFamily:"var(--font-mono)", padding:"2px 7px", background:"var(--accent-dim)", color:"var(--accent)", borderRadius:100, border:"1px solid rgba(0,229,255,0.3)", letterSpacing:"0.05em", marginLeft:4 }}>v3</span>
         </div>
         <div style={{ display:"flex", alignItems:"center", gap:7, fontSize:12, color:"var(--text3)", fontFamily:"var(--font-mono)" }}>
           <div style={{ width:7, height:7, borderRadius:"50%",
-            background:  testResult?.ok ? "var(--green)" : testResult?.ok===false ? "var(--red)" : "var(--text3)",
-            boxShadow:   testResult?.ok ? "0 0 8px var(--green)" : "none",
-            transition:  "all 0.3s" }}/>
+            background: testResult?.ok ? "var(--green)" : testResult?.ok===false ? "var(--red)" : "var(--text3)",
+            boxShadow:  testResult?.ok ? "0 0 8px var(--green)" : "none", transition:"all 0.3s" }}/>
           {testResult?.ok ? "CONNECTED" : testResult?.ok===false ? "FAILED" : "NOT TESTED"}
         </div>
       </header>
 
       <div style={{ flex:1, display:"flex", minHeight:0 }}>
 
-        {/* ── Sidebar ── */}
+        {/* Sidebar */}
         <div style={{ width:310, borderRight:"1px solid var(--border)", background:"var(--surface)", display:"flex", flexDirection:"column", overflowY:"auto", flexShrink:0 }}>
 
-          {/* SMTP Setup */}
+          {/* SMTP */}
           <div style={{ padding:"16px 18px", borderBottom:"1px solid var(--border)" }}>
             <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:14 }}>
               <Settings2 size={14} color="var(--accent)"/>
               <span style={{ fontWeight:600, fontSize:13 }}>SMTP Setup</span>
             </div>
 
-            {/* Provider preset */}
             <Field label="Email Provider">
-              <select value={preset} onChange={e => handlePreset(e.target.value)}
-                style={S.select} onFocus={onFocus} onBlur={onBlur}>
-                {Object.entries(PRESETS).map(([key, p]) => (
-                  <option key={key} value={key}>{p.label}</option>
-                ))}
+              <select value={preset} onChange={e => handlePreset(e.target.value)} style={S.select} onFocus={onFocus} onBlur={onBlur}>
+                {Object.entries(PRESETS).map(([key, p]) => <option key={key} value={key}>{p.label}</option>)}
               </select>
             </Field>
 
-            {/* Hostinger tip */}
             {preset === "hostinger" && (
               <div style={{ background:"rgba(0,229,255,0.06)", border:"1px solid rgba(0,229,255,0.15)", borderRadius:"var(--radius)", padding:"10px 12px", marginBottom:14, fontSize:12, lineHeight:1.8, color:"var(--text2)" }}>
                 <div style={{ fontWeight:700, color:"var(--accent)", marginBottom:4, fontSize:11, letterSpacing:"0.06em", textTransform:"uppercase" }}>Hostinger Setup</div>
                 <div>① Username = your full domain email</div>
                 <div>② Password = Hostinger email password</div>
-                <div>③ From Email = same as username</div>
               </div>
             )}
-
-            {/* Gmail tip */}
             {preset === "gmail" && (
               <div style={{ background:"rgba(0,229,255,0.06)", border:"1px solid rgba(0,229,255,0.15)", borderRadius:"var(--radius)", padding:"10px 12px", marginBottom:14, fontSize:12, lineHeight:1.8, color:"var(--text2)" }}>
                 <div style={{ fontWeight:700, color:"var(--accent)", marginBottom:4, fontSize:11, letterSpacing:"0.06em", textTransform:"uppercase" }}>Gmail Setup</div>
-                <div>① Enable 2-Step Verification in Google</div>
-                <div>② Go to Google Account → App Passwords</div>
-                <div>③ Create app password → use it here</div>
+                <div>① Enable 2-Step Verification</div>
+                <div>② Google Account → App Passwords</div>
+                <div>③ Use that app password here</div>
               </div>
             )}
 
-            {/* Host + Port row */}
             <div style={{ display:"grid", gridTemplateColumns:"1fr 76px", gap:8, marginBottom:14 }}>
               <div>
                 <label style={S.label}>SMTP Host</label>
-                <input value={smtpHost} onChange={e => setSmtpHost(e.target.value)}
-                  placeholder="smtp.hostinger.com" style={S.input} onFocus={onFocus} onBlur={onBlur}/>
+                <input value={smtpHost} onChange={e => setSmtpHost(e.target.value)} placeholder="smtp.hostinger.com" style={S.input} onFocus={onFocus} onBlur={onBlur}/>
               </div>
               <div>
                 <label style={S.label}>Port</label>
-                <input value={smtpPort} onChange={e => setSmtpPort(e.target.value)}
-                  placeholder="587" style={S.input} onFocus={onFocus} onBlur={onBlur}/>
+                <input value={smtpPort} onChange={e => setSmtpPort(e.target.value)} placeholder="587" style={S.input} onFocus={onFocus} onBlur={onBlur}/>
               </div>
             </div>
 
-            <TextInput label="Username" value={smtpUser} onChange={setSmtpUser}
-              placeholder="you@yourdomain.com"/>
-            <TextInput label="Password" type="password" value={smtpPass} onChange={setSmtpPass}
-              placeholder="Your email password"/>
+            <TextInput label="Username" value={smtpUser} onChange={setSmtpUser} placeholder="you@yourdomain.com"/>
+            <TextInput label="Password" type="password" value={smtpPass} onChange={setSmtpPass} placeholder="Your email password"/>
 
             <div style={S.divider}/>
             <label style={S.label}>Display Name (optional)</label>
-            <div style={{ fontSize:11, color:"var(--text3)", marginBottom:8, lineHeight:1.5 }}>
-              Emails will be sent <strong style={{color:"var(--accent)"}}>from</strong> your username above.
-            </div>
-            <TextInput placeholder="e.g. Tushar from Prishi Enterprise" value={fromName} onChange={setFromName} mono={false}/>
+            <div style={{ fontSize:11, color:"var(--text3)", marginBottom:8 }}>Emails sent from your username above.</div>
+            <TextInput placeholder="e.g. Tushar — Prishi Enterprise" value={fromName} onChange={setFromName} mono={false}/>
 
-            {/* Test button */}
             <button onClick={handleTest} disabled={testing}
               style={{ ...S.btnSecondary, width:"100%", marginTop:4,
                 borderColor: testResult?.ok ? "var(--green)" : testResult?.ok===false ? "var(--red)" : "var(--border2)",
                 color:       testResult?.ok ? "var(--green)" : testResult?.ok===false ? "var(--red)" : "var(--text2)",
-              }}
-              onMouseEnter={e => !testing && (e.currentTarget.style.borderColor = "var(--accent)")}
-              onMouseLeave={e => !testing && (e.currentTarget.style.borderColor = testResult?.ok ? "var(--green)" : testResult?.ok===false ? "var(--red)" : "var(--border2)")}>
-              {testing
-                ? <><Loader2 size={13} style={{ animation:"spin 1s linear infinite" }}/> Testing...</>
-                : <><Wifi size={13}/> Test Connection</>}
+              }}>
+              {testing ? <><Loader2 size={13} style={{ animation:"spin 1s linear infinite" }}/> Testing...</> : <><Wifi size={13}/> Test Connection</>}
             </button>
 
             {testResult && (
@@ -299,16 +319,43 @@ export default function App() {
             )}
           </div>
 
-          {/* Attachments */}
+          {/* Delay Settings */}
           <div style={{ padding:"16px 18px", borderBottom:"1px solid var(--border)" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+              <Clock size={14} color="var(--amber)"/>
+              <span style={{ fontWeight:600, fontSize:13 }}>Send Delay (Bulk)</span>
+            </div>
+            <div style={{ fontSize:11, color:"var(--text3)", marginBottom:12, lineHeight:1.6 }}>
+              Random delay between each email. Avoids spam filters and looks human.
+            </div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+              <div>
+                <label style={S.label}>Min (seconds)</label>
+                <input value={minDelay} onChange={e => setMinDelay(e.target.value)} placeholder="30"
+                  style={S.input} type="number" min="1" onFocus={onFocus} onBlur={onBlur}/>
+              </div>
+              <div>
+                <label style={S.label}>Max (seconds)</label>
+                <input value={maxDelay} onChange={e => setMaxDelay(e.target.value)} placeholder="60"
+                  style={S.input} type="number" min="1" onFocus={onFocus} onBlur={onBlur}/>
+              </div>
+            </div>
+            {recipientList.length > 1 && (
+              <div style={{ marginTop:10, padding:"8px 10px", background:"var(--amber-dim)", border:"1px solid rgba(255,183,3,0.2)", borderRadius:"var(--radius)", fontSize:11, color:"var(--amber)", fontFamily:"var(--font-mono)", lineHeight:1.7 }}>
+                ⏱ {recipientList.length} recipients<br/>
+                Est. time: {estimatedMin}s – {estimatedMax}s
+              </div>
+            )}
+          </div>
+
+          {/* Attachments */}
+          <div style={{ padding:"16px 18px" }}>
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12 }}>
               <div style={{ display:"flex", alignItems:"center", gap:8 }}>
                 <Paperclip size={14} color="var(--green)"/>
                 <span style={{ fontWeight:600, fontSize:13 }}>Attachments</span>
               </div>
-              {attachments.length > 0 && (
-                <span style={{ ...S.chip, background:"var(--green-dim)", color:"var(--green)" }}>{attachments.length}</span>
-              )}
+              {attachments.length > 0 && <span style={{ ...S.chip, background:"var(--green-dim)", color:"var(--green)" }}>{attachments.length}</span>}
             </div>
             <div
               onClick={() => fileRef.current?.click()}
@@ -321,15 +368,12 @@ export default function App() {
               <div style={{ fontSize:12 }}>Drop files or click to browse</div>
               <div style={{ fontSize:10, marginTop:3 }}>PDF, images, docs — max 25MB</div>
             </div>
-            <input ref={fileRef} type="file" multiple style={{ display:"none" }}
-              onChange={e => { addFiles(e.target.files); e.target.value=""; }}/>
-            {attachments.map(f => (
-              <FileChip key={f.name+f.size} file={f} onRemove={r => setAttachments(p => p.filter(x => x !== r))}/>
-            ))}
+            <input ref={fileRef} type="file" multiple style={{ display:"none" }} onChange={e => { addFiles(e.target.files); e.target.value=""; }}/>
+            {attachments.map(f => <FileChip key={f.name+f.size} file={f} onRemove={r => setAttachments(p => p.filter(x => x !== r))}/>)}
           </div>
         </div>
 
-        {/* ── Compose + Log ── */}
+        {/* Compose + Log */}
         <div style={{ flex:1, display:"flex", flexDirection:"column", minHeight:0 }}>
 
           {/* Compose */}
@@ -339,43 +383,65 @@ export default function App() {
               <span style={{ fontWeight:700, fontSize:16, letterSpacing:"-0.3px" }}>Compose Email</span>
             </div>
 
-            <TextInput label="To" value={to} onChange={setTo} placeholder="recipient@example.com"/>
+            {/* Recipients */}
+            <Field label={
+              <span style={{ display:"flex", alignItems:"center", gap:6 }}>
+                To
+                {recipientList.length > 0 && (
+                  <span style={{ ...S.chip, background: isBulk ? "var(--amber-dim)" : "var(--accent-dim)", color: isBulk ? "var(--amber)" : "var(--accent)", fontWeight:600 }}>
+                    {isBulk ? <><Users size={10}/> {recipientList.length} recipients</> : "1 recipient"}
+                  </span>
+                )}
+              </span>
+            }>
+              <textarea
+                value={to} onChange={e => setTo(e.target.value)}
+                placeholder={"one@example.com\ntwo@example.com\nthree@example.com\n\nor comma-separated: a@x.com, b@x.com"}
+                style={{ ...S.textarea, minHeight:90, fontFamily:"var(--font-mono)" }}
+                onFocus={onFocus} onBlur={onBlur}
+              />
+              <div style={{ fontSize:11, color:"var(--text3)", marginTop:4 }}>One email per line, or comma-separated.</div>
+            </Field>
+
             <TextInput label="Subject" value={subject} onChange={setSubject} placeholder="Enter subject..." mono={false}/>
 
             <Field label="Message Body">
               <textarea
                 value={body} onChange={e => setBody(e.target.value)}
-                placeholder={isHtml
-                  ? "<p>Hello,</p>\n<p>Your message here...</p>"
-                  : "Hello,\n\nYour message here...\n\nBest regards"}
-                style={{ ...S.textarea, minHeight:220 }}
+                placeholder={isHtml ? "<p>Hello,</p>\n<p>Your message here...</p>" : "Hello,\n\nYour message here...\n\nBest regards"}
+                style={{ ...S.textarea, minHeight:200 }}
                 onFocus={onFocus} onBlur={onBlur}
               />
             </Field>
 
             <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", marginTop:-6 }}>
-              <input type="checkbox" checked={isHtml} onChange={e => setIsHtml(e.target.checked)}
-                style={{ accentColor:"var(--accent)" }}/>
+              <input type="checkbox" checked={isHtml} onChange={e => setIsHtml(e.target.checked)} style={{ accentColor:"var(--accent)" }}/>
               <span style={{ fontSize:12, color:"var(--text2)" }}>Send as HTML</span>
               {isHtml && <span style={{ ...S.chip, background:"var(--accent-dim)", color:"var(--accent)" }}>HTML mode</span>}
             </label>
           </div>
 
+          {/* Progress bar (bulk only) */}
+          {sending && progress && progress.total > 1 && (
+            <div style={{ padding:"10px 28px", background:"var(--surface)", borderBottom:"1px solid var(--border)", flexShrink:0 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:"var(--text3)", fontFamily:"var(--font-mono)", marginBottom:6 }}>
+                <span>Sending {progress.current} of {progress.total}</span>
+                <span>{Math.round((progress.current / progress.total) * 100)}%</span>
+              </div>
+              <div style={{ height:4, background:"var(--border)", borderRadius:2, overflow:"hidden" }}>
+                <div style={{ height:"100%", background:"var(--accent)", borderRadius:2, width:`${(progress.current / progress.total) * 100}%`, transition:"width 0.4s ease" }}/>
+              </div>
+            </div>
+          )}
+
           {/* Send bar */}
           <div style={{ padding:"13px 28px", borderBottom:"1px solid var(--border)", display:"flex", gap:10, alignItems:"center", background:"var(--surface)", flexShrink:0 }}>
             <button onClick={handleSend} disabled={sending}
-              style={{ ...S.btnPrimary, opacity:sending?0.6:1, boxShadow:!sending?"0 0 18px rgba(0,229,255,0.2)":"none", minWidth:140 }}>
+              style={{ ...S.btnPrimary, opacity:sending?0.6:1, boxShadow:!sending?"0 0 18px rgba(0,229,255,0.2)":"none", minWidth:160 }}>
               {sending
-                ? <><Loader2 size={15} style={{ animation:"spin 1s linear infinite" }}/> Sending...</>
-                : <><Send size={15}/> Send Email</>}
+                ? <><Loader2 size={15} style={{ animation:"spin 1s linear infinite" }}/> {isBulk ? `Sending...` : "Sending..."}</>
+                : <><Send size={15}/> {isBulk ? `Send to ${recipientList.length} Recipients` : "Send Email"}</>}
             </button>
-
-            {sendResult && (
-              <div style={{ display:"flex", alignItems:"center", gap:6, fontSize:13, color: sendResult.ok ? "var(--green)" : "var(--red)" }}>
-                {sendResult.ok ? <CheckCircle size={15}/> : <AlertCircle size={15}/>}
-                {sendResult.ok ? "Sent successfully!" : "Failed — see log"}
-              </div>
-            )}
 
             <div style={{ flex:1 }}/>
             <button onClick={() => setLogs([])} style={S.btnSecondary}>

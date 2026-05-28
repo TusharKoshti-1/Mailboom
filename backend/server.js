@@ -17,7 +17,7 @@ app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 const frontendPath = path.join(__dirname, "public");
 app.use(express.static(frontendPath));
 
-// ─── Build transporter ────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 function createTransporter({ smtpHost, smtpPort, smtpUser, smtpPass }) {
   const port = parseInt(smtpPort, 10) || 587;
   return nodemailer.createTransport({
@@ -29,17 +29,28 @@ function createTransporter({ smtpHost, smtpPort, smtpUser, smtpPass }) {
   });
 }
 
+function randomDelay(minSec, maxSec) {
+  const ms = (Math.random() * (maxSec - minSec) + minSec) * 1000;
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function parseRecipients(raw) {
+  return raw
+    .split(/[\n,]+/)
+    .map(e => e.trim())
+    .filter(e => e && e.includes("@"));
+}
+
 // ─── Health ───────────────────────────────────────────────────────────────────
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", version: "2.0.0", timestamp: new Date().toISOString() });
+  res.json({ status: "ok", version: "3.0.0", timestamp: new Date().toISOString() });
 });
 
-// ─── Test SMTP Connection ─────────────────────────────────────────────────────
+// ─── Test Connection ──────────────────────────────────────────────────────────
 app.post("/api/test-connection", async (req, res) => {
   const { smtpHost, smtpPort, smtpUser, smtpPass } = req.body;
   if (!smtpHost || !smtpUser || !smtpPass)
     return res.json({ ok: false, message: "SMTP host, username and password are required." });
-
   try {
     const transporter = createTransporter({ smtpHost, smtpPort, smtpUser, smtpPass });
     await transporter.verify();
@@ -49,44 +60,78 @@ app.post("/api/test-connection", async (req, res) => {
   }
 });
 
-// ─── Send Email ───────────────────────────────────────────────────────────────
+// ─── Send (single or bulk with random delay) ──────────────────────────────────
 app.post("/api/send", upload.array("attachments", 10), async (req, res) => {
-  const { smtpHost, smtpPort, smtpUser, smtpPass, fromName, fromEmail, to, subject, body, isHtml } = req.body;
+  const {
+    smtpHost, smtpPort, smtpUser, smtpPass,
+    fromName, to, subject, body, isHtml,
+    minDelay, maxDelay,
+  } = req.body;
 
   if (!smtpHost || !smtpUser || !smtpPass)
     return res.json({ ok: false, message: "SMTP credentials are required." });
-  if (!fromEmail) return res.json({ ok: false, message: "From email is required." });
-  if (!to)        return res.json({ ok: false, message: "Recipient (To) is required." });
-  if (!subject)   return res.json({ ok: false, message: "Subject is required." });
-  if (!body)      return res.json({ ok: false, message: "Message body is required." });
+  if (!to)      return res.json({ ok: false, message: "Recipient (To) is required." });
+  if (!subject) return res.json({ ok: false, message: "Subject is required." });
+  if (!body)    return res.json({ ok: false, message: "Message body is required." });
 
-  const useHtml = isHtml === "true" || isHtml === true;
+  const recipients = parseRecipients(to);
+  if (recipients.length === 0)
+    return res.json({ ok: false, message: "No valid email addresses found." });
 
-  const mailOptions = {
-    from:    fromName ? `"${fromName}" <${fromEmail.trim()}>` : fromEmail.trim(),
-    to:      to.trim(),
-    subject: subject.trim(),
-    [useHtml ? "html" : "text"]: body,
-    [useHtml ? "text" : "html"]: useHtml
-      ? body.replace(/<[^>]+>/g, "")
-      : body.replace(/\n/g, "<br>"),
-  };
+  const useHtml  = isHtml === "true" || isHtml === true;
+  const fromAddr = smtpUser.trim();
+  const fromFull = fromName ? `"${fromName}" <${fromAddr}>` : fromAddr;
+  const minS     = parseFloat(minDelay) || 30;
+  const maxS     = parseFloat(maxDelay) || 60;
 
-  if (req.files && req.files.length > 0) {
-    mailOptions.attachments = req.files.map(f => ({
-      filename:    f.originalname,
-      content:     f.buffer,
-      contentType: f.mimetype,
-    }));
+  const attachments = req.files && req.files.length > 0
+    ? req.files.map(f => ({ filename: f.originalname, content: f.buffer, contentType: f.mimetype }))
+    : [];
+
+  const transporter = createTransporter({ smtpHost, smtpPort, smtpUser, smtpPass });
+
+  const results = [];
+
+  for (let i = 0; i < recipients.length; i++) {
+    const recipient = recipients[i];
+
+    // Random delay between emails (not before the first one)
+    if (i > 0) {
+      const waitSec = Math.random() * (maxS - minS) + minS;
+      console.log(`⏳ Waiting ${waitSec.toFixed(1)}s before sending to ${recipient}...`);
+      await randomDelay(minS, maxS);
+    }
+
+    const mailOptions = {
+      from:    fromFull,
+      to:      recipient,
+      subject: subject.trim(),
+      text:    useHtml ? body.replace(/<[^>]+>/g, "") : body,
+      html:    useHtml ? body : body.replace(/\n/g, "<br>"),
+    };
+    if (attachments.length > 0) mailOptions.attachments = attachments;
+
+    try {
+      const info = await transporter.sendMail(mailOptions);
+      console.log(`✅ Sent to ${recipient} | ID: ${info.messageId}`);
+      results.push({ email: recipient, ok: true, message: "Sent successfully" });
+    } catch (err) {
+      console.error(`❌ Failed to ${recipient}: ${err.message}`);
+      results.push({ email: recipient, ok: false, message: err.message });
+    }
   }
 
-  try {
-    const transporter = createTransporter({ smtpHost, smtpPort, smtpUser, smtpPass });
-    await transporter.sendMail(mailOptions);
-    res.json({ ok: true, message: `Email sent successfully to ${to}!` });
-  } catch (err) {
-    res.json({ ok: false, message: err.message });
-  }
+  const successCount = results.filter(r => r.ok).length;
+  const failCount    = results.filter(r => !r.ok).length;
+
+  res.json({
+    ok:      failCount === 0,
+    total:   recipients.length,
+    success: successCount,
+    failed:  failCount,
+    results,
+    message: `${successCount} of ${recipients.length} emails sent successfully.`,
+  });
 });
 
 // ─── SPA Fallback ─────────────────────────────────────────────────────────────
@@ -94,7 +139,7 @@ app.get("*", (req, res) => {
   const index = path.join(frontendPath, "index.html");
   fs.existsSync(index)
     ? res.sendFile(index)
-    : res.json({ status: "API running", note: "Frontend not built yet. Run: npm run build --prefix frontend" });
+    : res.json({ status: "API running", note: "Run: npm run build in frontend folder" });
 });
 
-app.listen(PORT, "0.0.0.0", () => console.log(`✉  MailSend running → http://localhost:${PORT}`));
+app.listen(PORT, "0.0.0.0", () => console.log(`✉  MailSend v3 running → http://localhost:${PORT}`));
