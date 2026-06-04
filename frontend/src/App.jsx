@@ -179,10 +179,10 @@ export default function App() {
     fd.append("to",       to);
     fd.append("subject",  subject);
     fd.append("body",     body);
-    fd.append("isHtml",   isHtml);
+    fd.append("isHtml",   isHtml ? "true" : "false");
     fd.append("minDelay", min);
     fd.append("maxDelay", max);
-    attachments.forEach(f => fd.append("attachments", f));
+    attachments.forEach(f => fd.append("attachments", f, f.name));
 
     try {
       const res  = await fetch("/api/send", { method:"POST", body:fd });
@@ -221,8 +221,11 @@ export default function App() {
   };
 
   const addFiles = files => {
-    const ex = new Set(attachments.map(f => f.name + f.size));
-    setAttachments(p => [...p, ...Array.from(files).filter(f => !ex.has(f.name + f.size))]);
+    const newFiles = Array.from(files);
+    setAttachments(p => {
+      const ex = new Set(p.map(f => f.name + f.size));
+      return [...p, ...newFiles.filter(f => !ex.has(f.name + f.size))];
+    });
   };
 
   // Estimated time for bulk
