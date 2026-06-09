@@ -353,11 +353,23 @@ app.post("/api/sender-groups/:id/accounts/:accountId/test", authMiddleware, asyn
 
 // ─── Send Email ───────────────────────────────────────────────────────────────
 app.post("/api/send", authMiddleware, upload.array("attachments", 10), async (req, res) => {
-  const { smtpHost, smtpPort, smtpUser, smtpPass, fromName, to, subject, body, isHtml, minDelay, maxDelay, senderGroupId } = req.body;
+  const { smtpHost, smtpPort, smtpUser, smtpPass, fromName, to, subject, body, isHtml, minDelay, maxDelay, senderGroupId, contentGroupId } = req.body;
 
-  if (!to)      return res.json({ ok: false, message: "Recipient (To) is required." });
-  if (!subject) return res.json({ ok: false, message: "Subject is required." });
-  if (!body)    return res.json({ ok: false, message: "Message body is required." });
+  if (!to) return res.json({ ok: false, message: "Recipient (To) is required." });
+
+  // Load content variations if using a content group
+  let contentVariations = null;
+  if (contentGroupId) {
+    const cv = await pool.query(
+      "SELECT cv.* FROM content_variations cv JOIN content_groups cg ON cg.id = cv.group_id WHERE cv.group_id=$1 AND cg.user_id=$2",
+      [contentGroupId, req.user.id]
+    );
+    if (cv.rows.length === 0) return res.json({ ok: false, message: "Content group has no variations. Add subject/body variations first." });
+    contentVariations = cv.rows;
+  } else {
+    if (!subject) return res.json({ ok: false, message: "Subject is required." });
+    if (!body)    return res.json({ ok: false, message: "Message body is required." });
+  }
 
   const recipients = parseRecipients(to);
   if (recipients.length === 0) return res.json({ ok: false, message: "No valid email addresses found." });
@@ -377,8 +389,8 @@ app.post("/api/send", authMiddleware, upload.array("attachments", 10), async (re
   }
 
   const useHtml = isHtml === "true" || isHtml === true;
-  const minS    = parseFloat(minDelay) || 30;
-  const maxS    = parseFloat(maxDelay) || 60;
+  const minS    = parseFloat(minDelay) || 10;
+  const maxS    = parseFloat(maxDelay) || 20;
   const attachments = req.files && req.files.length > 0
     ? req.files.map(f => ({ filename: f.originalname, content: f.buffer, contentType: f.mimetype }))
     : [];
@@ -397,13 +409,26 @@ app.post("/api/send", authMiddleware, upload.array("attachments", 10), async (re
       sender = { host: smtpHost, port: smtpPort, username: smtpUser, password: smtpPass, from_name: fromName };
     }
 
+    // Pick random content variation OR use single subject/body
+    let emailSubject, emailBody, emailIsHtml;
+    if (contentVariations) {
+      const variation = pickRandom(contentVariations);
+      emailSubject = variation.subject;
+      emailBody    = variation.body;
+      emailIsHtml  = variation.is_html;
+    } else {
+      emailSubject = subject.trim();
+      emailBody    = body;
+      emailIsHtml  = useHtml;
+    }
+
     const fromAddr = sender.username.trim();
     const fromFull = sender.from_name ? `"${sender.from_name}" <${fromAddr}>` : fromAddr;
 
     const mailOptions = {
-      from: fromFull, to: recipient, subject: subject.trim(),
-      text: useHtml ? body.replace(/<[^>]+>/g, "") : body,
-      html: useHtml ? body : body.replace(/\n/g, "<br>"),
+      from: fromFull, to: recipient, subject: emailSubject,
+      text: emailIsHtml ? emailBody.replace(/<[^>]+>/g, "") : emailBody,
+      html: emailIsHtml ? emailBody : emailBody.replace(/\n/g, "<br>"),
     };
     if (attachments.length > 0) mailOptions.attachments = attachments;
 
@@ -411,10 +436,10 @@ app.post("/api/send", authMiddleware, upload.array("attachments", 10), async (re
       const transporter = createTransporter(sender);
       const info = await transporter.sendMail(mailOptions);
       console.log(`✅ [user:${req.user.id}] ${fromAddr} → ${recipient} | ${info.messageId}`);
-      results.push({ email: recipient, ok: true, from: fromAddr, message: "Sent successfully" });
+      results.push({ email: recipient, ok: true, from: fromAddr, subject: emailSubject, message: "Sent successfully" });
     } catch (err) {
       console.error(`❌ [user:${req.user.id}] ${fromAddr} → ${recipient}: ${err.message}`);
-      results.push({ email: recipient, ok: false, from: fromAddr, message: err.message });
+      results.push({ email: recipient, ok: false, from: fromAddr, subject: emailSubject, message: err.message });
     }
   }
 
@@ -425,6 +450,104 @@ app.post("/api/send", authMiddleware, upload.array("attachments", 10), async (re
     failed: recipients.length - successCount,
     results, message: `${successCount} of ${recipients.length} emails sent successfully.`,
   });
+});
+
+// ─── CONTENT GROUPS: Create ───────────────────────────────────────────────────
+app.post("/api/content-groups", authMiddleware, async (req, res) => {
+  const { name, description } = req.body;
+  if (!name) return res.json({ ok: false, message: "Group name is required." });
+  try {
+    const result = await pool.query(
+      "INSERT INTO content_groups (user_id, name, description) VALUES ($1, $2, $3) RETURNING *",
+      [req.user.id, name.trim(), description || ""]
+    );
+    res.json({ ok: true, group: result.rows[0], message: "Content group created." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── CONTENT GROUPS: List ─────────────────────────────────────────────────────
+app.get("/api/content-groups", authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT cg.*, COUNT(cv.id)::int AS variation_count
+      FROM content_groups cg
+      LEFT JOIN content_variations cv ON cv.group_id = cg.id
+      WHERE cg.user_id = $1
+      GROUP BY cg.id ORDER BY cg.created_at DESC
+    `, [req.user.id]);
+    res.json({ ok: true, groups: result.rows });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── CONTENT GROUPS: Get one with variations ──────────────────────────────────
+app.get("/api/content-groups/:id", authMiddleware, async (req, res) => {
+  try {
+    const g = await pool.query("SELECT * FROM content_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    if (g.rows.length === 0) return res.json({ ok: false, message: "Content group not found." });
+    const v = await pool.query("SELECT * FROM content_variations WHERE group_id=$1 ORDER BY sort_order ASC, created_at ASC", [req.params.id]);
+    res.json({ ok: true, group: g.rows[0], variations: v.rows });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── CONTENT GROUPS: Delete ───────────────────────────────────────────────────
+app.delete("/api/content-groups/:id", authMiddleware, async (req, res) => {
+  try {
+    await pool.query("DELETE FROM content_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    res.json({ ok: true, message: "Content group deleted." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── CONTENT VARIATIONS: Add ──────────────────────────────────────────────────
+app.post("/api/content-groups/:id/variations", authMiddleware, async (req, res) => {
+  const { subject, body, isHtml } = req.body;
+  if (!subject || !body) return res.json({ ok: false, message: "Subject and body are required." });
+  const g = await pool.query("SELECT id FROM content_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+  if (g.rows.length === 0) return res.json({ ok: false, message: "Content group not found." });
+  try {
+    const count  = await pool.query("SELECT COUNT(*) FROM content_variations WHERE group_id=$1", [req.params.id]);
+    if (parseInt(count.rows[0].count) >= 20)
+      return res.json({ ok: false, message: "Maximum 20 variations per group." });
+    const result = await pool.query(
+      "INSERT INTO content_variations (group_id, subject, body, is_html, sort_order) VALUES ($1,$2,$3,$4,$5) RETURNING *",
+      [req.params.id, subject.trim(), body, isHtml === true || isHtml === "true", parseInt(count.rows[0].count)]
+    );
+    res.json({ ok: true, variation: result.rows[0], message: "Variation added." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── CONTENT VARIATIONS: Update ───────────────────────────────────────────────
+app.put("/api/content-groups/:id/variations/:varId", authMiddleware, async (req, res) => {
+  const { subject, body, isHtml } = req.body;
+  if (!subject || !body) return res.json({ ok: false, message: "Subject and body are required." });
+  try {
+    await pool.query(
+      "UPDATE content_variations SET subject=$1, body=$2, is_html=$3 WHERE id=$4 AND group_id=$5",
+      [subject.trim(), body, isHtml === true || isHtml === "true", req.params.varId, req.params.id]
+    );
+    res.json({ ok: true, message: "Variation updated." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── CONTENT VARIATIONS: Delete ───────────────────────────────────────────────
+app.delete("/api/content-groups/:id/variations/:varId", authMiddleware, async (req, res) => {
+  try {
+    await pool.query("DELETE FROM content_variations WHERE id=$1 AND group_id=$2", [req.params.varId, req.params.id]);
+    res.json({ ok: true, message: "Variation deleted." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
 });
 
 // ─── SPA Fallback — MUST BE LAST ─────────────────────────────────────────────

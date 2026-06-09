@@ -61,6 +61,24 @@ async function initDB() {
       from_name   VARCHAR(100),
       added_at    TIMESTAMP DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS content_groups (
+      id          SERIAL PRIMARY KEY,
+      user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      name        VARCHAR(100) NOT NULL,
+      description VARCHAR(255),
+      created_at  TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS content_variations (
+      id          SERIAL PRIMARY KEY,
+      group_id    INTEGER REFERENCES content_groups(id) ON DELETE CASCADE,
+      subject     TEXT NOT NULL,
+      body        TEXT NOT NULL,
+      is_html     BOOLEAN DEFAULT FALSE,
+      sort_order  INTEGER DEFAULT 0,
+      created_at  TIMESTAMP DEFAULT NOW()
+    );
   `);
   console.log("✅ Database tables ready");
 }
