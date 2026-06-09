@@ -5,7 +5,6 @@ const pool = new Pool({
   ssl: process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: false } : false,
 });
 
-// Create tables if they don't exist
 async function initDB() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -26,6 +25,41 @@ async function initDB() {
       password    VARCHAR(255),
       from_name   VARCHAR(100),
       updated_at  TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS email_groups (
+      id          SERIAL PRIMARY KEY,
+      user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      name        VARCHAR(100) NOT NULL,
+      description VARCHAR(255),
+      created_at  TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS email_group_members (
+      id          SERIAL PRIMARY KEY,
+      group_id    INTEGER REFERENCES email_groups(id) ON DELETE CASCADE,
+      email       VARCHAR(100) NOT NULL,
+      name        VARCHAR(100),
+      added_at    TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS sender_groups (
+      id          SERIAL PRIMARY KEY,
+      user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      name        VARCHAR(100) NOT NULL,
+      description VARCHAR(255),
+      created_at  TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS sender_accounts (
+      id          SERIAL PRIMARY KEY,
+      group_id    INTEGER REFERENCES sender_groups(id) ON DELETE CASCADE,
+      host        VARCHAR(100) NOT NULL,
+      port        INTEGER DEFAULT 587,
+      username    VARCHAR(100) NOT NULL,
+      password    VARCHAR(255) NOT NULL,
+      from_name   VARCHAR(100),
+      added_at    TIMESTAMP DEFAULT NOW()
     );
   `);
   console.log("✅ Database tables ready");

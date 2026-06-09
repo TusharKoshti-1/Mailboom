@@ -1,3 +1,4 @@
+require("dotenv").config();
 const express    = require("express");
 const multer     = require("multer");
 const cors       = require("cors");
@@ -5,7 +6,6 @@ const path       = require("path");
 const fs         = require("fs");
 const nodemailer = require("nodemailer");
 const bcrypt     = require("bcryptjs");
-require("dotenv").config();
 const jwt        = require("jsonwebtoken");
 const { pool, initDB } = require("./db");
 
@@ -28,8 +28,7 @@ function authMiddleware(req, res, next) {
   if (!header || !header.startsWith("Bearer "))
     return res.status(401).json({ ok: false, message: "Unauthorized — please login." });
   try {
-    const token = header.split(" ")[1];
-    req.user = jwt.verify(token, SECRET);
+    req.user = jwt.verify(header.split(" ")[1], SECRET);
     next();
   } catch {
     res.status(401).json({ ok: false, message: "Invalid or expired token — please login again." });
@@ -37,29 +36,30 @@ function authMiddleware(req, res, next) {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-function createTransporter({ smtpHost, smtpPort, smtpUser, smtpPass }) {
-  const port = parseInt(smtpPort, 10) || 587;
+function createTransporter({ host, port, username, password }) {
+  const p = parseInt(port, 10) || 587;
   return nodemailer.createTransport({
-    host:   smtpHost,
-    port:   port,
-    secure: port === 465,
-    auth:   { user: smtpUser, pass: smtpPass },
-    tls:    { rejectUnauthorized: false },
+    host: host, port: p, secure: p === 465,
+    auth: { user: username, pass: password },
+    tls:  { rejectUnauthorized: false },
   });
 }
 
 function randomDelay(minSec, maxSec) {
-  const ms = (Math.random() * (maxSec - minSec) + minSec) * 1000;
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise(resolve => setTimeout(resolve, (Math.random() * (maxSec - minSec) + minSec) * 1000));
 }
 
 function parseRecipients(raw) {
   return raw.split(/[\n,]+/).map(e => e.trim()).filter(e => e && e.includes("@"));
 }
 
+function pickRandom(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
 // ─── Health ───────────────────────────────────────────────────────────────────
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", version: "3.0.0", timestamp: new Date().toISOString() });
+  res.json({ status: "ok", version: "4.0.0", timestamp: new Date().toISOString() });
 });
 
 // ─── AUTH: Register ───────────────────────────────────────────────────────────
@@ -69,12 +69,10 @@ app.post("/api/auth/register", async (req, res) => {
     return res.json({ ok: false, message: "Name, email and password are required." });
   if (password.length < 6)
     return res.json({ ok: false, message: "Password must be at least 6 characters." });
-
   try {
     const exists = await pool.query("SELECT id FROM users WHERE email = $1", [email.toLowerCase()]);
     if (exists.rows.length > 0)
       return res.json({ ok: false, message: "Email already registered. Please login." });
-
     const hashed = await bcrypt.hash(password, 10);
     const result = await pool.query(
       "INSERT INTO users (name, email, password) VALUES ($1, $2, $3) RETURNING id, name, email, plan",
@@ -82,9 +80,8 @@ app.post("/api/auth/register", async (req, res) => {
     );
     const user  = result.rows[0];
     const token = jwt.sign({ id: user.id, email: user.email, name: user.name }, SECRET, { expiresIn: "7d" });
-    res.json({ ok: true, message: "Account created successfully!", token, user: { id: user.id, name: user.name, email: user.email, plan: user.plan } });
+    res.json({ ok: true, message: "Account created!", token, user: { id: user.id, name: user.name, email: user.email, plan: user.plan } });
   } catch (err) {
-    console.error("Register error:", err.message);
     res.json({ ok: false, message: "Registration failed. Please try again." });
   }
 });
@@ -94,43 +91,36 @@ app.post("/api/auth/login", async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password)
     return res.json({ ok: false, message: "Email and password are required." });
-
   try {
     const result = await pool.query("SELECT * FROM users WHERE email = $1", [email.toLowerCase()]);
     if (result.rows.length === 0)
       return res.json({ ok: false, message: "No account found with this email." });
-
     const user  = result.rows[0];
     const match = await bcrypt.compare(password, user.password);
-    if (!match)
-      return res.json({ ok: false, message: "Incorrect password." });
-
+    if (!match) return res.json({ ok: false, message: "Incorrect password." });
     const token = jwt.sign({ id: user.id, email: user.email, name: user.name }, SECRET, { expiresIn: "7d" });
     res.json({ ok: true, message: "Login successful!", token, user: { id: user.id, name: user.name, email: user.email, plan: user.plan } });
   } catch (err) {
-    console.error("Login error:", err.message);
     res.json({ ok: false, message: "Login failed. Please try again." });
   }
 });
 
-// ─── AUTH: Get current user ───────────────────────────────────────────────────
+// ─── AUTH: Me ─────────────────────────────────────────────────────────────────
 app.get("/api/auth/me", authMiddleware, async (req, res) => {
   try {
     const result = await pool.query("SELECT id, name, email, plan, created_at FROM users WHERE id = $1", [req.user.id]);
-    if (result.rows.length === 0)
-      return res.json({ ok: false, message: "User not found." });
+    if (result.rows.length === 0) return res.json({ ok: false, message: "User not found." });
     res.json({ ok: true, user: result.rows[0] });
   } catch (err) {
     res.json({ ok: false, message: "Failed to fetch user." });
   }
 });
 
-// ─── SMTP Settings: Save ─────────────────────────────────────────────────────
+// ─── SMTP: Save ───────────────────────────────────────────────────────────────
 app.post("/api/smtp/save", authMiddleware, async (req, res) => {
   const { host, port, username, password, fromName } = req.body;
   if (!host || !username || !password)
     return res.json({ ok: false, message: "Host, username and password are required." });
-
   try {
     const exists = await pool.query("SELECT id FROM smtp_settings WHERE user_id = $1", [req.user.id]);
     if (exists.rows.length > 0) {
@@ -150,25 +140,23 @@ app.post("/api/smtp/save", authMiddleware, async (req, res) => {
   }
 });
 
-// ─── SMTP Settings: Load ─────────────────────────────────────────────────────
+// ─── SMTP: Load ───────────────────────────────────────────────────────────────
 app.get("/api/smtp/load", authMiddleware, async (req, res) => {
   try {
     const result = await pool.query("SELECT host, port, username, password, from_name FROM smtp_settings WHERE user_id = $1", [req.user.id]);
-    if (result.rows.length === 0)
-      return res.json({ ok: true, smtp: null });
-    res.json({ ok: true, smtp: result.rows[0] });
+    res.json({ ok: true, smtp: result.rows.length > 0 ? result.rows[0] : null });
   } catch (err) {
     res.json({ ok: false, message: "Failed to load SMTP settings." });
   }
 });
 
-// ─── Test SMTP Connection ─────────────────────────────────────────────────────
+// ─── SMTP: Test ───────────────────────────────────────────────────────────────
 app.post("/api/test-connection", authMiddleware, async (req, res) => {
   const { smtpHost, smtpPort, smtpUser, smtpPass } = req.body;
   if (!smtpHost || !smtpUser || !smtpPass)
     return res.json({ ok: false, message: "SMTP host, username and password are required." });
   try {
-    const transporter = createTransporter({ smtpHost, smtpPort, smtpUser, smtpPass });
+    const transporter = createTransporter({ host: smtpHost, port: smtpPort, username: smtpUser, password: smtpPass });
     await transporter.verify();
     res.json({ ok: true, message: `Connected to ${smtpHost}:${smtpPort || 587} — ready to send!` });
   } catch (err) {
@@ -176,75 +164,273 @@ app.post("/api/test-connection", authMiddleware, async (req, res) => {
   }
 });
 
+// ─── RECIPIENT GROUPS: Create ─────────────────────────────────────────────────
+app.post("/api/groups", authMiddleware, async (req, res) => {
+  const { name, description } = req.body;
+  if (!name) return res.json({ ok: false, message: "Group name is required." });
+  try {
+    const result = await pool.query(
+      "INSERT INTO email_groups (user_id, name, description) VALUES ($1, $2, $3) RETURNING *",
+      [req.user.id, name.trim(), description || ""]
+    );
+    res.json({ ok: true, group: result.rows[0], message: "Group created." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── RECIPIENT GROUPS: List ───────────────────────────────────────────────────
+app.get("/api/groups", authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT g.*, COUNT(m.id)::int AS member_count
+      FROM email_groups g
+      LEFT JOIN email_group_members m ON m.group_id = g.id
+      WHERE g.user_id = $1
+      GROUP BY g.id ORDER BY g.created_at DESC
+    `, [req.user.id]);
+    res.json({ ok: true, groups: result.rows });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── RECIPIENT GROUPS: Get one ────────────────────────────────────────────────
+app.get("/api/groups/:id", authMiddleware, async (req, res) => {
+  try {
+    const g = await pool.query("SELECT * FROM email_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    if (g.rows.length === 0) return res.json({ ok: false, message: "Group not found." });
+    const m = await pool.query("SELECT * FROM email_group_members WHERE group_id=$1 ORDER BY added_at ASC", [req.params.id]);
+    res.json({ ok: true, group: g.rows[0], members: m.rows });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── RECIPIENT GROUPS: Delete ─────────────────────────────────────────────────
+app.delete("/api/groups/:id", authMiddleware, async (req, res) => {
+  try {
+    await pool.query("DELETE FROM email_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    res.json({ ok: true, message: "Group deleted." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── RECIPIENT GROUPS: Add members ───────────────────────────────────────────
+app.post("/api/groups/:id/members", authMiddleware, async (req, res) => {
+  const { emails } = req.body;
+  if (!emails || emails.length === 0) return res.json({ ok: false, message: "No emails provided." });
+  const g = await pool.query("SELECT id FROM email_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+  if (g.rows.length === 0) return res.json({ ok: false, message: "Group not found." });
+  try {
+    const existing    = await pool.query("SELECT email FROM email_group_members WHERE group_id=$1", [req.params.id]);
+    const existingSet = new Set(existing.rows.map(r => r.email.toLowerCase()));
+    let added = 0;
+    for (const item of emails) {
+      const email = (typeof item === "string" ? item : item.email).trim().toLowerCase();
+      const name  = typeof item === "object" ? (item.name || "") : "";
+      if (!email.includes("@") || existingSet.has(email)) continue;
+      await pool.query("INSERT INTO email_group_members (group_id, email, name) VALUES ($1,$2,$3)", [req.params.id, email, name]);
+      existingSet.add(email); added++;
+    }
+    res.json({ ok: true, message: `${added} emails added.`, added });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── RECIPIENT GROUPS: Remove member ─────────────────────────────────────────
+app.delete("/api/groups/:id/members/:memberId", authMiddleware, async (req, res) => {
+  try {
+    await pool.query("DELETE FROM email_group_members WHERE id=$1 AND group_id=$2", [req.params.memberId, req.params.id]);
+    res.json({ ok: true, message: "Member removed." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── SENDER GROUPS: Create ────────────────────────────────────────────────────
+app.post("/api/sender-groups", authMiddleware, async (req, res) => {
+  const { name, description } = req.body;
+  if (!name) return res.json({ ok: false, message: "Group name is required." });
+  try {
+    const result = await pool.query(
+      "INSERT INTO sender_groups (user_id, name, description) VALUES ($1, $2, $3) RETURNING *",
+      [req.user.id, name.trim(), description || ""]
+    );
+    res.json({ ok: true, group: result.rows[0], message: "Sender group created." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── SENDER GROUPS: List ──────────────────────────────────────────────────────
+app.get("/api/sender-groups", authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT sg.*, COUNT(sa.id)::int AS account_count
+      FROM sender_groups sg
+      LEFT JOIN sender_accounts sa ON sa.group_id = sg.id
+      WHERE sg.user_id = $1
+      GROUP BY sg.id ORDER BY sg.created_at DESC
+    `, [req.user.id]);
+    res.json({ ok: true, groups: result.rows });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── SENDER GROUPS: Get one with accounts ─────────────────────────────────────
+app.get("/api/sender-groups/:id", authMiddleware, async (req, res) => {
+  try {
+    const g = await pool.query("SELECT * FROM sender_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    if (g.rows.length === 0) return res.json({ ok: false, message: "Sender group not found." });
+    const a = await pool.query("SELECT id, host, port, username, from_name, added_at FROM sender_accounts WHERE group_id=$1 ORDER BY added_at ASC", [req.params.id]);
+    res.json({ ok: true, group: g.rows[0], accounts: a.rows });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── SENDER GROUPS: Delete ────────────────────────────────────────────────────
+app.delete("/api/sender-groups/:id", authMiddleware, async (req, res) => {
+  try {
+    await pool.query("DELETE FROM sender_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    res.json({ ok: true, message: "Sender group deleted." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── SENDER GROUPS: Add account ───────────────────────────────────────────────
+app.post("/api/sender-groups/:id/accounts", authMiddleware, async (req, res) => {
+  const { host, port, username, password, fromName } = req.body;
+  if (!host || !username || !password)
+    return res.json({ ok: false, message: "Host, username and password are required." });
+  const g = await pool.query("SELECT id FROM sender_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+  if (g.rows.length === 0) return res.json({ ok: false, message: "Sender group not found." });
+  try {
+    // Test the SMTP before saving
+    const transporter = createTransporter({ host, port: port || 587, username, password });
+    await transporter.verify();
+    await pool.query(
+      "INSERT INTO sender_accounts (group_id, host, port, username, password, from_name) VALUES ($1,$2,$3,$4,$5,$6)",
+      [req.params.id, host, port || 587, username, password, fromName || ""]
+    );
+    res.json({ ok: true, message: `${username} added and verified.` });
+  } catch (err) {
+    res.json({ ok: false, message: `SMTP verification failed: ${err.message}` });
+  }
+});
+
+// ─── SENDER GROUPS: Remove account ───────────────────────────────────────────
+app.delete("/api/sender-groups/:id/accounts/:accountId", authMiddleware, async (req, res) => {
+  try {
+    await pool.query("DELETE FROM sender_accounts WHERE id=$1 AND group_id=$2", [req.params.accountId, req.params.id]);
+    res.json({ ok: true, message: "Account removed." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── SENDER GROUPS: Test one account ─────────────────────────────────────────
+app.post("/api/sender-groups/:id/accounts/:accountId/test", authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT sa.* FROM sender_accounts sa JOIN sender_groups sg ON sg.id = sa.group_id WHERE sa.id=$1 AND sg.user_id=$2",
+      [req.params.accountId, req.user.id]
+    );
+    if (result.rows.length === 0) return res.json({ ok: false, message: "Account not found." });
+    const a = result.rows[0];
+    const transporter = createTransporter({ host: a.host, port: a.port, username: a.username, password: a.password });
+    await transporter.verify();
+    res.json({ ok: true, message: `${a.username} connected successfully.` });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
 // ─── Send Email ───────────────────────────────────────────────────────────────
 app.post("/api/send", authMiddleware, upload.array("attachments", 10), async (req, res) => {
-  const { smtpHost, smtpPort, smtpUser, smtpPass, fromName, to, subject, body, isHtml, minDelay, maxDelay } = req.body;
+  const { smtpHost, smtpPort, smtpUser, smtpPass, fromName, to, subject, body, isHtml, minDelay, maxDelay, senderGroupId } = req.body;
 
-  if (!smtpHost || !smtpUser || !smtpPass)
-    return res.json({ ok: false, message: "SMTP credentials are required." });
   if (!to)      return res.json({ ok: false, message: "Recipient (To) is required." });
   if (!subject) return res.json({ ok: false, message: "Subject is required." });
   if (!body)    return res.json({ ok: false, message: "Message body is required." });
 
   const recipients = parseRecipients(to);
-  if (recipients.length === 0)
-    return res.json({ ok: false, message: "No valid email addresses found." });
+  if (recipients.length === 0) return res.json({ ok: false, message: "No valid email addresses found." });
 
-  const useHtml  = isHtml === "true" || isHtml === true;
-  const fromAddr = smtpUser.trim();
-  const fromFull = fromName ? `"${fromName}" <${fromAddr}>` : fromAddr;
-  const minS     = parseFloat(minDelay) || 30;
-  const maxS     = parseFloat(maxDelay) || 60;
+  // Load sender accounts if using a sender group
+  let senderAccounts = null;
+  if (senderGroupId) {
+    const g = await pool.query(
+      "SELECT sa.* FROM sender_accounts sa JOIN sender_groups sg ON sg.id = sa.group_id WHERE sa.group_id=$1 AND sg.user_id=$2",
+      [senderGroupId, req.user.id]
+    );
+    if (g.rows.length === 0) return res.json({ ok: false, message: "Sender group has no accounts. Add SMTP accounts first." });
+    senderAccounts = g.rows;
+  } else {
+    if (!smtpHost || !smtpUser || !smtpPass)
+      return res.json({ ok: false, message: "SMTP credentials are required." });
+  }
 
+  const useHtml = isHtml === "true" || isHtml === true;
+  const minS    = parseFloat(minDelay) || 30;
+  const maxS    = parseFloat(maxDelay) || 60;
   const attachments = req.files && req.files.length > 0
     ? req.files.map(f => ({ filename: f.originalname, content: f.buffer, contentType: f.mimetype }))
     : [];
 
-  const transporter = createTransporter({ smtpHost, smtpPort, smtpUser, smtpPass });
   const results = [];
 
   for (let i = 0; i < recipients.length; i++) {
-    const recipient = recipients[i];
     if (i > 0) await randomDelay(minS, maxS);
+    const recipient = recipients[i];
+
+    // Pick random sender account from group OR use single SMTP
+    let sender;
+    if (senderAccounts) {
+      sender = pickRandom(senderAccounts);
+    } else {
+      sender = { host: smtpHost, port: smtpPort, username: smtpUser, password: smtpPass, from_name: fromName };
+    }
+
+    const fromAddr = sender.username.trim();
+    const fromFull = sender.from_name ? `"${sender.from_name}" <${fromAddr}>` : fromAddr;
 
     const mailOptions = {
-      from:    fromFull,
-      to:      recipient,
-      subject: subject.trim(),
-      text:    useHtml ? body.replace(/<[^>]+>/g, "") : body,
-      html:    useHtml ? body : body.replace(/\n/g, "<br>"),
+      from: fromFull, to: recipient, subject: subject.trim(),
+      text: useHtml ? body.replace(/<[^>]+>/g, "") : body,
+      html: useHtml ? body : body.replace(/\n/g, "<br>"),
     };
     if (attachments.length > 0) mailOptions.attachments = attachments;
 
     try {
+      const transporter = createTransporter(sender);
       const info = await transporter.sendMail(mailOptions);
-      console.log(`✅ [user:${req.user.id}] Sent to ${recipient} | ${info.messageId}`);
-      results.push({ email: recipient, ok: true, message: "Sent successfully" });
+      console.log(`✅ [user:${req.user.id}] ${fromAddr} → ${recipient} | ${info.messageId}`);
+      results.push({ email: recipient, ok: true, from: fromAddr, message: "Sent successfully" });
     } catch (err) {
-      console.error(`❌ [user:${req.user.id}] Failed to ${recipient}: ${err.message}`);
-      results.push({ email: recipient, ok: false, message: err.message });
+      console.error(`❌ [user:${req.user.id}] ${fromAddr} → ${recipient}: ${err.message}`);
+      results.push({ email: recipient, ok: false, from: fromAddr, message: err.message });
     }
   }
 
   const successCount = results.filter(r => r.ok).length;
-  const failCount    = results.filter(r => !r.ok).length;
-
   res.json({
-    ok: failCount === 0,
-    total: recipients.length,
-    success: successCount,
-    failed: failCount,
-    results,
-    message: `${successCount} of ${recipients.length} emails sent successfully.`,
+    ok: results.filter(r => !r.ok).length === 0,
+    total: recipients.length, success: successCount,
+    failed: recipients.length - successCount,
+    results, message: `${successCount} of ${recipients.length} emails sent successfully.`,
   });
 });
 
-// ─── SPA Fallback ─────────────────────────────────────────────────────────────
+// ─── SPA Fallback — MUST BE LAST ─────────────────────────────────────────────
 app.get("*", (req, res) => {
   const index = path.join(frontendPath, "index.html");
-  fs.existsSync(index)
-    ? res.sendFile(index)
-    : res.json({ status: "API running" });
+  fs.existsSync(index) ? res.sendFile(index) : res.json({ status: "API running" });
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
