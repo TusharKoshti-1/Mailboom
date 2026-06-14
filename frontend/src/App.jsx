@@ -1520,10 +1520,12 @@ function StatCard({ icon, label, value, color }) {
 
 function TrackingPage({ authHeader }) {
   const navigate = useNavigate();
-  const [emails,  setEmails]  = useState([]);
-  const [summary, setSummary] = useState({ total_sent:0, total_opened:0, total_opens:0 });
-  const [loading, setLoading] = useState(false);
-  const [msg,     setMsg]     = useState(null);
+  const [emails,    setEmails]    = useState([]);
+  const [summary,   setSummary]   = useState({ total_sent:0, total_opened:0, total_opens:0 });
+  const [loading,   setLoading]   = useState(false);
+  const [msg,       setMsg]       = useState(null);
+  const [filter,    setFilter]    = useState("all");  // all | none | one | multi
+  const [exporting, setExporting] = useState(false);
 
   const showMsg = (type, text) => { setMsg({ type, text }); setTimeout(() => setMsg(null), 3000); };
 
@@ -1548,7 +1550,42 @@ function TrackingPage({ authHeader }) {
     } catch {}
   };
 
+  // Download the currently-filtered tracking list as an .xlsx (auth-aware blob).
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const res = await fetch(`/api/tracking/export?filter=${filter}`, { headers: authHeader });
+      if (!res.ok) { showMsg("error", "Export failed."); setExporting(false); return; }
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement("a");
+      a.href = url; a.download = `tracking-${filter}.xlsx`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    } catch { showMsg("error", "Export failed."); }
+    setExporting(false);
+  };
+
   const openRate = summary.total_sent > 0 ? Math.round((summary.total_opened / summary.total_sent) * 100) : 0;
+
+  // Seen filters
+  const matchesFilter = (e) =>
+    filter === "none"  ? e.open_count === 0 :
+    filter === "one"   ? e.open_count === 1 :
+    filter === "multi" ? e.open_count >  1 : true;
+  const counts = {
+    all:   emails.length,
+    none:  emails.filter(e => e.open_count === 0).length,
+    one:   emails.filter(e => e.open_count === 1).length,
+    multi: emails.filter(e => e.open_count >  1).length,
+  };
+  const shown = emails.filter(matchesFilter);
+  const FILTERS = [
+    { key:"all",   label:"All" },
+    { key:"none",  label:"Not Seen" },
+    { key:"one",   label:"Seen Once" },
+    { key:"multi", label:"Seen 2+" },
+  ];
 
   return (
     <div style={{ flex:1, padding:"28px 32px", overflowY:"auto" }}>
@@ -1559,7 +1596,12 @@ function TrackingPage({ authHeader }) {
           <div style={{ fontWeight:800, fontSize:22, letterSpacing:"-0.5px" }}>Email Tracking</div>
           <div style={{ color:"var(--text3)", fontSize:13, marginTop:3 }}>See whether and when each sent email was opened, and how many times.</div>
         </div>
-        <button onClick={load} style={{ ...S.btnSecondary }}><RefreshCw size={13}/> Refresh</button>
+        <div style={{ display:"flex", gap:8 }}>
+          <button onClick={handleExport} disabled={exporting || shown.length===0} style={{ ...S.btnSecondary, borderColor:"var(--green)", color:"var(--green)", opacity:(exporting||shown.length===0)?0.5:1 }}>
+            {exporting ? <><Loader2 size={13} style={{ animation:"spin 1s linear infinite" }}/> Exporting...</> : <><Download size={13}/> Export Excel</>}
+          </button>
+          <button onClick={load} style={{ ...S.btnSecondary }}><RefreshCw size={13}/> Refresh</button>
+        </div>
       </div>
 
       <div style={{ display:"grid", gridTemplateColumns:"repeat(4, 1fr)", gap:14, marginBottom:24 }}>
@@ -1569,6 +1611,25 @@ function TrackingPage({ authHeader }) {
         <StatCard icon={<BarChart3 size={20} color="var(--amber)"/>} label="Open Rate"          value={`${openRate}%`}        color="#ffb703"/>
       </div>
 
+      {/* Seen filters */}
+      {emails.length > 0 && (
+        <div style={{ display:"flex", gap:6, marginBottom:14, flexWrap:"wrap" }}>
+          {FILTERS.map(f => {
+            const isActive = filter === f.key;
+            return (
+              <button key={f.key} onClick={() => setFilter(f.key)}
+                style={{ display:"flex", alignItems:"center", gap:7, padding:"7px 14px", borderRadius:100, border:"1px solid", cursor:"pointer", fontSize:12, fontWeight:600, transition:"all 0.15s",
+                  background: isActive ? "var(--accent-dim)" : "transparent",
+                  borderColor: isActive ? "var(--accent)" : "var(--border2)",
+                  color: isActive ? "var(--accent)" : "var(--text3)" }}>
+                {f.label}
+                <span style={{ fontFamily:"var(--font-mono)", fontSize:11, padding:"1px 7px", borderRadius:100, background: isActive ? "var(--accent)" : "var(--surface2)", color: isActive ? "var(--bg)" : "var(--text3)" }}>{counts[f.key]}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {loading && <div style={{ color:"var(--text3)", fontSize:13 }}>Loading...</div>}
       {!loading && emails.length === 0 && (
         <div style={{ textAlign:"center", padding:"60px 0", color:"var(--text3)" }}>
@@ -1577,13 +1638,16 @@ function TrackingPage({ authHeader }) {
           <div style={{ fontSize:13 }}>Send an email from Compose — opens will appear here.</div>
         </div>
       )}
+      {!loading && emails.length > 0 && shown.length === 0 && (
+        <div style={{ textAlign:"center", padding:"40px 0", color:"var(--text3)", fontSize:13 }}>No emails match this filter.</div>
+      )}
 
-      {emails.length > 0 && (
+      {shown.length > 0 && (
         <div style={{ ...S.card, padding:0, overflow:"hidden" }}>
           <div style={{ display:"grid", gridTemplateColumns:"2fr 2fr 90px 1.4fr 36px", gap:12, padding:"12px 20px", borderBottom:"1px solid var(--border)", fontSize:11, fontWeight:700, letterSpacing:"0.06em", textTransform:"uppercase", color:"var(--text3)" }}>
             <div>Recipient</div><div>Subject</div><div style={{ textAlign:"center" }}>Opens</div><div>Last Seen</div><div/>
           </div>
-          {emails.map(em => (
+          {shown.map(em => (
             <div key={em.id} onClick={() => navigate(`/tracking/${em.id}`)}
               style={{ display:"grid", gridTemplateColumns:"2fr 2fr 90px 1.4fr 36px", gap:12, padding:"13px 20px", borderBottom:"1px solid var(--border)", alignItems:"center", cursor:"pointer", transition:"background 0.15s" }}
               onMouseEnter={e => e.currentTarget.style.background="var(--surface2)"}

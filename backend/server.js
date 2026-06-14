@@ -847,6 +847,45 @@ app.get("/api/tracking", authMiddleware, async (req, res) => {
   }
 });
 
+// Maps a "seen" filter to an extra SQL condition on open_count.
+function trackingFilterClause(filter) {
+  switch (filter) {
+    case "none":  return "AND open_count = 0";
+    case "one":   return "AND open_count = 1";
+    case "multi": return "AND open_count > 1";
+    default:      return ""; // all
+  }
+}
+
+// ─── TRACKING: Export to Excel (respects the seen filter) ─────────────────────
+app.get("/api/tracking/export", authMiddleware, async (req, res) => {
+  try {
+    const clause = trackingFilterClause(req.query.filter);
+    const r = await pool.query(
+      `SELECT recipient, subject, from_addr, open_count, first_opened_at, last_opened_at, sent_at
+       FROM sent_emails WHERE user_id=$1 ${clause} ORDER BY sent_at DESC`,
+      [req.user.id]
+    );
+    const fmt = (d) => d ? new Date(d).toISOString().replace("T", " ").slice(0, 19) : "";
+    const aoa = [
+      ["Recipient", "Subject", "From", "Times Seen", "First Seen", "Last Seen", "Sent At"],
+      ...r.rows.map(e => [e.recipient, e.subject || "", e.from_addr || "", e.open_count, fmt(e.first_opened_at), fmt(e.last_opened_at), fmt(e.sent_at)]),
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws["!cols"] = [{ wch: 34 }, { wch: 34 }, { wch: 26 }, { wch: 11 }, { wch: 20 }, { wch: 20 }, { wch: 20 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Tracking");
+    const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+
+    const tag = ({ none: "not-seen", one: "seen-1", multi: "seen-2plus" }[req.query.filter]) || "all";
+    res.set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.set("Content-Disposition", `attachment; filename="tracking-${tag}.xlsx"`);
+    res.send(buf);
+  } catch (err) {
+    res.status(500).json({ ok: false, message: err.message });
+  }
+});
+
 // ─── TRACKING: One email with all its opens ───────────────────────────────────
 app.get("/api/tracking/:id", authMiddleware, async (req, res) => {
   try {
