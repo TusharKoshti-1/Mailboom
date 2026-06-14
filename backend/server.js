@@ -333,6 +333,30 @@ app.post("/api/groups/:id/import", authMiddleware, upload.single("file"), async 
   }
 });
 
+// ─── RECIPIENT GROUPS: Export to Excel ────────────────────────────────────────
+// Streams the group's members back as a downloadable .xlsx file.
+app.get("/api/groups/:id/export", authMiddleware, async (req, res) => {
+  try {
+    const g = await pool.query("SELECT name FROM email_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    if (g.rows.length === 0) return res.status(404).json({ ok: false, message: "Group not found." });
+    const m = await pool.query("SELECT email, name FROM email_group_members WHERE group_id=$1 ORDER BY added_at ASC", [req.params.id]);
+
+    const aoa = [["Email", "Name"], ...m.rows.map(r => [r.email, r.name || ""])];
+    const ws  = XLSX.utils.aoa_to_sheet(aoa);
+    ws["!cols"] = [{ wch: 38 }, { wch: 24 }];
+    const wb  = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Recipients");
+    const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+
+    const safeName = (g.rows[0].name || "recipients").replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 60);
+    res.set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.set("Content-Disposition", `attachment; filename="${safeName}.xlsx"`);
+    res.send(buf);
+  } catch (err) {
+    res.status(500).json({ ok: false, message: err.message });
+  }
+});
+
 // ─── SENDER GROUPS: Create ────────────────────────────────────────────────────
 app.post("/api/sender-groups", authMiddleware, async (req, res) => {
   const { name, description } = req.body;

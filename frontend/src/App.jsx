@@ -5,7 +5,7 @@ import {
   X, Upload, Loader2, AlertCircle, Terminal, RefreshCw,
   Clock, Users, LogOut, User, Save, Plus, Trash2, ChevronRight,
   ArrowLeft, FolderOpen, UserPlus, AtSign, CheckCircle, FileText, Edit2, Type,
-  Activity, BarChart3, MailOpen,
+  Activity, BarChart3, MailOpen, Download,
 } from "lucide-react";
 
 const onFocus = e => e.target.style.borderColor = "var(--accent)";
@@ -477,6 +477,7 @@ function RecipientGroupsPage({ authHeader }) {
   const [addEmails,   setAddEmails]   = useState("");
   const [adding,      setAdding]      = useState(false);
   const [importing,   setImporting]   = useState(false);
+  const [exporting,   setExporting]   = useState(false);
   const importRef = useRef();
 
   const showMsg = (type, text) => { setMsg({ type, text }); setTimeout(() => setMsg(null), 3000); };
@@ -493,6 +494,25 @@ function RecipientGroupsPage({ authHeader }) {
       else showMsg("error", data.message);
     } catch { showMsg("error", "Failed to import file."); }
     setImporting(false);
+  };
+
+  // Download the group's members as an .xlsx file. We fetch with the auth header
+  // (a plain link can't send it), then trigger a browser download from the blob.
+  const handleExport = async () => {
+    if (!activeGroup) return;
+    setExporting(true);
+    try {
+      const res = await fetch(`/api/groups/${activeGroup.id}/export`, { headers: authHeader });
+      if (!res.ok) { showMsg("error", "Export failed."); setExporting(false); return; }
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement("a");
+      a.href = url;
+      a.download = `${(activeGroup.name || "recipients").replace(/[^a-zA-Z0-9._-]+/g, "_")}.xlsx`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    } catch { showMsg("error", "Export failed."); }
+    setExporting(false);
   };
 
   // Send a group's members to the Compose page via router state. When invoked
@@ -610,7 +630,7 @@ function RecipientGroupsPage({ authHeader }) {
                 <div style={{ display:"flex", gap:8 }}>
                   <button onClick={() => useInCompose(g)}
                     style={{ ...S.btnSecondary, fontSize:12, padding:"7px 14px", borderColor:"var(--accent)", color:"var(--accent)" }}>
-                    <Send size={12}/> Use in Compose
+                    <Send size={12}/> Send
                   </button>
                   <button onClick={() => loadGroup(g)} style={{ ...S.btnSecondary, fontSize:12, padding:"7px 14px" }}>
                     <ChevronRight size={14}/> Open
@@ -655,8 +675,11 @@ function RecipientGroupsPage({ authHeader }) {
               {activeGroup.description && <div style={{ color:"var(--text3)", fontSize:13 }}>{activeGroup.description}</div>}
             </div>
             <span style={{ ...S.chip, background:"var(--accent-dim)", color:"var(--accent)", fontSize:13, padding:"4px 12px" }}>{members.length} members</span>
+            <button onClick={handleExport} disabled={exporting || members.length===0} style={{ ...S.btnSecondary, padding:"9px 16px", fontSize:13, opacity:(exporting||members.length===0)?0.5:1 }}>
+              {exporting ? <><Loader2 size={13} style={{ animation:"spin 1s linear infinite" }}/> Exporting...</> : <><Download size={13}/> Export Excel</>}
+            </button>
             <button onClick={() => useInCompose(activeGroup, members)} style={{ ...S.btnPrimary, padding:"9px 18px", fontSize:13 }}>
-              <Send size={13}/> Use in Compose
+              <Send size={13}/> Send to Group
             </button>
           </div>
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:20, alignItems:"start" }}>
