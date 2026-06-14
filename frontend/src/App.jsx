@@ -476,8 +476,24 @@ function RecipientGroupsPage({ authHeader }) {
   const [newDesc,     setNewDesc]     = useState("");
   const [addEmails,   setAddEmails]   = useState("");
   const [adding,      setAdding]      = useState(false);
+  const [importing,   setImporting]   = useState(false);
+  const importRef = useRef();
 
   const showMsg = (type, text) => { setMsg({ type, text }); setTimeout(() => setMsg(null), 3000); };
+
+  const handleImportFile = async (file) => {
+    if (!file) return;
+    setImporting(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file, file.name);
+      const res  = await fetch(`/api/groups/${activeGroup.id}/import`, { method:"POST", headers: authHeader, body: fd });
+      const data = await res.json();
+      if (data.ok) { showMsg("success", data.message); loadGroup(activeGroup); }
+      else showMsg("error", data.message);
+    } catch { showMsg("error", "Failed to import file."); }
+    setImporting(false);
+  };
 
   // Send a group's members to the Compose page via router state. When invoked
   // from the list (no members loaded yet) we fetch them first.
@@ -655,6 +671,20 @@ function RecipientGroupsPage({ authHeader }) {
               <button onClick={handleAddEmails} disabled={adding} style={{ ...S.btnPrimary, width:"100%" }}>
                 {adding ? <><Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> Adding...</> : <><UserPlus size={14}/> Add to Group</>}
               </button>
+
+              <div style={S.divider}/>
+              <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+                <Upload size={15} color="var(--green)"/><span style={{ fontWeight:700, fontSize:14 }}>Import from Excel / CSV</span>
+              </div>
+              <div style={{ fontSize:11, color:"var(--text3)", marginBottom:10, lineHeight:1.6 }}>
+                Upload an <strong>.xlsx</strong>, <strong>.xls</strong> or <strong>.csv</strong> file. Every email address found in any column is added (duplicates skipped).
+              </div>
+              <input ref={importRef} type="file" accept=".xlsx,.xls,.csv" style={{ display:"none" }}
+                onChange={e => { handleImportFile(e.target.files[0]); e.target.value=""; }}/>
+              <button onClick={() => importRef.current?.click()} disabled={importing}
+                style={{ ...S.btnSecondary, width:"100%", borderColor:"var(--green)", color:"var(--green)" }}>
+                {importing ? <><Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> Importing...</> : <><Upload size={14}/> Upload Excel File</>}
+              </button>
             </div>
             <div style={{ ...S.card, padding:0, overflow:"hidden" }}>
               <div style={{ padding:"16px 20px", borderBottom:"1px solid var(--border)", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
@@ -688,6 +718,7 @@ function RecipientGroupsPage({ authHeader }) {
 // ─── COMPOSE PAGE ─────────────────────────────────────────────────────────────
 function ComposePage({ authHeader }) {
   const location = useLocation();
+  const navigate = useNavigate();
   const [preset,   setPreset]   = useState("hostinger");
   const [smtpHost, setSmtpHost] = useState(PRESETS.hostinger.host);
   const [smtpPort, setSmtpPort] = useState(PRESETS.hostinger.port);
@@ -815,12 +846,9 @@ function ComposePage({ authHeader }) {
     if (min > max) return addLog("error", "❌ Min delay > max delay.");
 
     setSending(true);
-    setProgress({ current:0, total:recipientList.length, results:[] });
 
     const selectedGroup = senderGroups.find(g => String(g.id) === String(senderGroupId));
-    addLog("info", isBulk
-      ? `📋 Bulk send to ${recipientList.length} recipients${useSenderGroup ? ` via "${selectedGroup?.name}" (${selectedGroup?.account_count} senders)` : ""}...`
-      : `📤 Sending to ${recipientList[0]}...`);
+    addLog("info", `🚀 Starting background campaign — ${recipientList.length} recipient(s)${useSenderGroup ? ` via "${selectedGroup?.name}"` : ""}...`);
 
     const fd = new FormData();
     if (!useSenderGroup) {
@@ -842,26 +870,23 @@ function ComposePage({ authHeader }) {
       fd.append("body",   body);
       fd.append("isHtml", isHtml ? "true" : "false");
     }
+    fd.append("name", subject || "Campaign");
     fd.append("minDelay", min);    fd.append("maxDelay", max);
     attachments.forEach(f => fd.append("attachments", f, f.name));
 
     try {
-      const res  = await fetch("/api/send", { method:"POST", headers: authHeader, body:fd });
+      const res  = await fetch("/api/campaigns", { method:"POST", headers: authHeader, body:fd });
       const data = await res.json();
-      if (data.results) {
-        data.results.forEach((r, i) => {
-          setProgress(p => ({ ...p, current:i+1, results:[...(p?.results||[]), r] }));
-          addLog(r.ok ? "success" : "error",
-            `${r.ok?"✅":"❌"} (${i+1}/${data.total}) ${r.email}${r.from ? ` ← ${r.from}` : ""} — ${r.ok?"sent":r.message}`);
-        });
-        addLog(data.failed===0?"success":"warn", `📊 Done — ${data.success} sent, ${data.failed} failed out of ${data.total}`);
-        if (data.success > 0) { setTo(""); setSubject(""); setBody(""); setAttachments([]); }
+      if (data.ok) {
+        addLog("success", `✅ ${data.message}`);
+        // The campaign now runs on the server. Jump to its live page; you can
+        // close the browser and it keeps sending until paused or stopped.
+        navigate(`/campaigns/${data.campaignId}`);
       } else {
-        addLog(data.ok?"success":"error", data.ok?`✅ ${data.message}`:`❌ ${data.message}`);
-        if (data.ok) { setTo(""); setSubject(""); setBody(""); setAttachments([]); }
+        addLog("error", `❌ ${data.message}`);
       }
     } catch (err) { addLog("error", `❌ Network error: ${err.message}`); }
-    setSending(false); setProgress(null);
+    setSending(false);
   };
 
   const addFiles = files => {
@@ -1104,7 +1129,7 @@ function ComposePage({ authHeader }) {
         <div style={{ padding:"13px 28px", borderBottom:"1px solid var(--border)", display:"flex", gap:10, alignItems:"center", background:"var(--surface)", flexShrink:0 }}>
           <button onClick={handleSend} disabled={sending}
             style={{ ...S.btnPrimary, opacity:sending?0.6:1, boxShadow:!sending?"0 0 18px rgba(0,229,255,0.2)":"none", minWidth:160 }}>
-            {sending?<><Loader2 size={15} style={{ animation:"spin 1s linear infinite" }}/> Sending...</>:<><Send size={15}/> {isBulk?`Send to ${recipientList.length} Recipients`:"Send Email"}</>}
+            {sending?<><Loader2 size={15} style={{ animation:"spin 1s linear infinite" }}/> Starting...</>:<><Send size={15}/> {recipientList.length>0?`Start Campaign · ${recipientList.length}`:"Start Campaign"}</>}
           </button>
           <div style={{ flex:1 }}/>
           <button onClick={() => setLogs([])} style={S.btnSecondary}><RefreshCw size={12}/> Clear Log</button>
@@ -1656,12 +1681,223 @@ function Meta({ label, value }) {
   );
 }
 
+// ─── CAMPAIGNS ────────────────────────────────────────────────────────────────
+const CAMP_STATUS = {
+  running:   { color:"var(--accent)", dim:"var(--accent-dim)", label:"Running" },
+  paused:    { color:"var(--amber)",  dim:"var(--amber-dim)",  label:"Paused" },
+  completed: { color:"var(--green)",  dim:"var(--green-dim)",  label:"Completed" },
+  stopped:   { color:"var(--red)",    dim:"var(--red-dim)",    label:"Stopped" },
+};
+
+function StatusBadge({ status }) {
+  const s = CAMP_STATUS[status] || { color:"var(--text3)", dim:"var(--surface2)", label:status };
+  return <span style={{ ...S.chip, background:s.dim, color:s.color, fontWeight:700 }}>
+    {status==="running" && <Loader2 size={11} style={{ animation:"spin 1s linear infinite" }}/>}{s.label}
+  </span>;
+}
+
+function ProgressBar({ sent, failed, total, color }) {
+  const pct  = total > 0 ? Math.round(((sent + failed) / total) * 100) : 0;
+  const sPct = total > 0 ? (sent / total) * 100 : 0;
+  const fPct = total > 0 ? (failed / total) * 100 : 0;
+  return (
+    <div>
+      <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:"var(--text3)", fontFamily:"var(--font-mono)", marginBottom:5 }}>
+        <span>{sent + failed} / {total} processed</span><span>{pct}%</span>
+      </div>
+      <div style={{ height:6, background:"var(--border)", borderRadius:3, overflow:"hidden", display:"flex" }}>
+        <div style={{ height:"100%", background:color||"var(--green)", width:`${sPct}%`, transition:"width 0.4s ease" }}/>
+        <div style={{ height:"100%", background:"var(--red)", width:`${fPct}%`, transition:"width 0.4s ease" }}/>
+      </div>
+    </div>
+  );
+}
+
+function CampaignsPage({ authHeader }) {
+  const navigate = useNavigate();
+  const [campaigns, setCampaigns] = useState([]);
+  const [loading,   setLoading]   = useState(true);
+  const [msg,       setMsg]       = useState(null);
+
+  const showMsg = (type, text) => { setMsg({ type, text }); setTimeout(() => setMsg(null), 3000); };
+
+  const load = async () => {
+    try {
+      const res  = await fetch("/api/campaigns", { headers: authHeader });
+      const data = await res.json();
+      if (data.ok) setCampaigns(data.campaigns);
+    } catch {}
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); const t = setInterval(load, 3000); return () => clearInterval(t); }, []);
+
+  const action = async (id, verb) => {
+    try {
+      const method = verb === "delete" ? "DELETE" : "POST";
+      const url = verb === "delete" ? `/api/campaigns/${id}` : `/api/campaigns/${id}/${verb}`;
+      const res  = await fetch(url, { method, headers: authHeader });
+      const data = await res.json();
+      showMsg(data.ok ? "success" : "error", data.message);
+      load();
+    } catch { showMsg("error", "Action failed."); }
+  };
+
+  const del = (e, id) => { e.stopPropagation(); if (confirm("Delete this campaign? It will stop sending and its history is removed.")) action(id, "delete"); };
+
+  return (
+    <div style={{ flex:1, padding:"28px 32px", overflowY:"auto" }}>
+      <Toast msg={msg}/>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:24 }}>
+        <div>
+          <div style={{ fontWeight:800, fontSize:22, letterSpacing:"-0.5px" }}>Campaigns</div>
+          <div style={{ color:"var(--text3)", fontSize:13, marginTop:3 }}>Campaigns run on the server. You can close this site — sending continues until you pause or stop it.</div>
+        </div>
+        <button onClick={() => navigate("/compose")} style={{ ...S.btnPrimary }}><Plus size={15}/> New Campaign</button>
+      </div>
+
+      {loading && <div style={{ color:"var(--text3)", fontSize:13 }}>Loading...</div>}
+      {!loading && campaigns.length === 0 && (
+        <div style={{ textAlign:"center", padding:"60px 0", color:"var(--text3)" }}>
+          <Send size={40} style={{ opacity:0.3, display:"block", margin:"0 auto 12px" }}/>
+          <div style={{ fontSize:15, fontWeight:600, marginBottom:6 }}>No campaigns yet</div>
+          <div style={{ fontSize:13 }}>Start one from the Compose page.</div>
+        </div>
+      )}
+
+      <div style={{ display:"grid", gap:12 }}>
+        {campaigns.map(c => {
+          const s = CAMP_STATUS[c.status] || {};
+          const active = c.status === "running" || c.status === "paused";
+          return (
+            <div key={c.id} onClick={() => navigate(`/campaigns/${c.id}`)}
+              style={{ padding:"16px 20px", background:"var(--surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-lg)", cursor:"pointer", transition:"border-color 0.15s" }}
+              onMouseEnter={e => e.currentTarget.style.borderColor="var(--border2)"}
+              onMouseLeave={e => e.currentTarget.style.borderColor="var(--border)"}>
+              <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:12 }}>
+                <div style={{ fontWeight:700, fontSize:15, flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{c.name || `Campaign #${c.id}`}</div>
+                <StatusBadge status={c.status}/>
+                <span style={{ fontSize:11, color:"var(--text3)", fontFamily:"var(--font-mono)" }}>{new Date(c.created_at).toLocaleString()}</span>
+              </div>
+              <ProgressBar sent={c.sent_count} failed={c.failed_count} total={c.total} color={s.color}/>
+              <div style={{ display:"flex", alignItems:"center", gap:14, marginTop:10 }}>
+                <span style={{ fontSize:12, color:"var(--green)", fontFamily:"var(--font-mono)" }}>✓ {c.sent_count} sent</span>
+                <span style={{ fontSize:12, color:"var(--red)", fontFamily:"var(--font-mono)" }}>✗ {c.failed_count} failed</span>
+                <span style={{ fontSize:12, color:"var(--text3)", fontFamily:"var(--font-mono)" }}>{c.total} total</span>
+                <div style={{ flex:1 }}/>
+                {c.status === "running" && <button onClick={e => { e.stopPropagation(); action(c.id, "pause"); }} style={{ ...S.btnSecondary, fontSize:12, padding:"6px 12px" }}>⏸ Pause</button>}
+                {c.status === "paused"  && <button onClick={e => { e.stopPropagation(); action(c.id, "resume"); }} style={{ ...S.btnSecondary, fontSize:12, padding:"6px 12px", borderColor:"var(--accent)", color:"var(--accent)" }}>▶ Resume</button>}
+                {active && <button onClick={e => { e.stopPropagation(); action(c.id, "stop"); }} style={{ ...S.btnSecondary, fontSize:12, padding:"6px 12px", borderColor:"var(--red)", color:"var(--red)" }}>⏹ Stop</button>}
+                {!active && <button onClick={e => del(e, c.id)} style={{ ...S.btnSecondary, fontSize:12, padding:"6px 10px" }}><Trash2 size={13}/></button>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function CampaignDetailPage({ authHeader }) {
+  const { id }   = useParams();
+  const navigate = useNavigate();
+  const [campaign, setCampaign] = useState(null);
+  const [recent,   setRecent]   = useState([]);
+  const [loading,  setLoading]  = useState(true);
+  const [error,    setError]    = useState("");
+  const [msg,      setMsg]      = useState(null);
+
+  const showMsg = (type, text) => { setMsg({ type, text }); setTimeout(() => setMsg(null), 3000); };
+
+  const load = async () => {
+    try {
+      const res  = await fetch(`/api/campaigns/${id}`, { headers: authHeader });
+      const data = await res.json();
+      if (data.ok) { setCampaign(data.campaign); setRecent(data.recent); }
+      else setError(data.message || "Not found.");
+    } catch { setError("Failed to load."); }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); const t = setInterval(load, 2000); return () => clearInterval(t); }, [id]);
+
+  const action = async (verb) => {
+    try {
+      const res  = await fetch(`/api/campaigns/${id}/${verb}`, { method:"POST", headers: authHeader });
+      const data = await res.json();
+      showMsg(data.ok ? "success" : "error", data.message);
+      load();
+    } catch { showMsg("error", "Action failed."); }
+  };
+
+  const s = campaign ? (CAMP_STATUS[campaign.status] || {}) : {};
+  const active = campaign && (campaign.status === "running" || campaign.status === "paused");
+
+  return (
+    <div style={{ flex:1, padding:"28px 32px", overflowY:"auto" }}>
+      <Toast msg={msg}/>
+      <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:24 }}>
+        <button onClick={() => navigate("/campaigns")} style={{ ...S.btnSecondary, width:"fit-content" }}><ArrowLeft size={13}/> Back</button>
+        <div style={{ fontWeight:800, fontSize:22, letterSpacing:"-0.5px", flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+          {campaign ? (campaign.name || `Campaign #${campaign.id}`) : "Campaign"}
+        </div>
+        {campaign && <StatusBadge status={campaign.status}/>}
+      </div>
+
+      {loading && !campaign && <div style={{ color:"var(--text3)", fontSize:13 }}>Loading...</div>}
+      {error && !campaign && <div style={{ color:"var(--red)", fontSize:13 }}>{error}</div>}
+
+      {campaign && (
+        <>
+          <div style={{ ...S.card, marginBottom:20 }}>
+            <ProgressBar sent={campaign.sent_count} failed={campaign.failed_count} total={campaign.total} color={s.color}/>
+            <div style={{ display:"flex", gap:10, marginTop:16 }}>
+              {campaign.status === "running" && <button onClick={() => action("pause")}  style={{ ...S.btnSecondary }}>⏸ Pause</button>}
+              {campaign.status === "paused"  && <button onClick={() => action("resume")} style={{ ...S.btnPrimary }}>▶ Resume</button>}
+              {active && <button onClick={() => action("stop")} style={{ ...S.btnSecondary, borderColor:"var(--red)", color:"var(--red)" }}>⏹ Stop</button>}
+              <div style={{ flex:1 }}/>
+              {active && <span style={{ fontSize:12, color:"var(--text3)", alignSelf:"center" }}>Auto-refreshing every 2s — safe to close the browser.</span>}
+            </div>
+          </div>
+
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(4, 1fr)", gap:14, marginBottom:24 }}>
+            <StatCard icon={<Send size={20} color="var(--accent)"/>}    label="Total"  value={campaign.total}        color="#00e5ff"/>
+            <StatCard icon={<CheckCircle size={20} color="var(--green)"/>} label="Sent" value={campaign.sent_count}  color="#00ff87"/>
+            <StatCard icon={<AlertCircle size={20} color="var(--red)"/>}  label="Failed" value={campaign.failed_count} color="#ff4d6d"/>
+            <StatCard icon={<Clock size={20} color="var(--amber)"/>}     label="Remaining" value={Math.max(0, campaign.total - campaign.sent_count - campaign.failed_count)} color="#ffb703"/>
+          </div>
+
+          <div style={{ ...S.card, padding:0, overflow:"hidden" }}>
+            <div style={{ padding:"16px 20px", borderBottom:"1px solid var(--border)", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+              <span style={{ fontWeight:700, fontSize:15 }}>Recent Activity</span>
+              <span style={{ ...S.chip, background:"var(--surface2)", color:"var(--text2)" }}>last {recent.length}</span>
+            </div>
+            {recent.length === 0 && <div style={{ padding:"40px 20px", textAlign:"center", color:"var(--text3)", fontSize:13 }}>No emails processed yet.</div>}
+            <div style={{ maxHeight:460, overflowY:"auto", fontFamily:"var(--font-mono)", fontSize:12 }}>
+              {recent.map((r, i) => (
+                <div key={i} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 20px", borderBottom:"1px solid var(--border)", color: r.status==="sent" ? "var(--green)" : "var(--red)" }}>
+                  <span style={{ flexShrink:0 }}>{r.status==="sent" ? "✅" : "❌"}</span>
+                  <span style={{ flex:1, minWidth:0, color:"var(--text2)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{r.email}</span>
+                  {r.from_addr && <span style={{ color:"var(--text3)", flexShrink:0 }}>← {r.from_addr}</span>}
+                  <span style={{ color:"var(--text3)", flexShrink:0 }}>{r.sent_at ? new Date(r.sent_at).toLocaleTimeString() : ""}</span>
+                  {r.status!=="sent" && r.error && <span style={{ color:"var(--red)", flexShrink:0, maxWidth:200, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={r.error}>{r.error}</span>}
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 function MainApp({ user, token, onLogout }) {
   const authHeader = { "Authorization": `Bearer ${token}` };
 
   const NAV = [
     { to:"/compose",          label:"Compose",           icon:<Mail size={13}/> },
+    { to:"/campaigns",        label:"Campaigns",         icon:<Send size={13}/> },
     { to:"/subject-groups",   label:"Subject Groups",    icon:<Type size={13}/> },
     { to:"/body-groups",      label:"Body Groups",       icon:<FileText size={13}/> },
     { to:"/sender-groups",    label:"Sender Groups",     icon:<AtSign size={13}/> },
@@ -1705,6 +1941,8 @@ function MainApp({ user, token, onLogout }) {
       <Routes>
         <Route path="/"                 element={<Navigate to="/compose" replace/>}/>
         <Route path="/compose"          element={<ComposePage authHeader={authHeader}/>}/>
+        <Route path="/campaigns"        element={<CampaignsPage authHeader={authHeader}/>}/>
+        <Route path="/campaigns/:id"    element={<CampaignDetailPage authHeader={authHeader}/>}/>
         <Route path="/subject-groups"   element={<SubjectGroupsPage authHeader={authHeader}/>}/>
         <Route path="/body-groups"      element={<BodyGroupsPage authHeader={authHeader}/>}/>
         <Route path="/sender-groups"    element={<SenderGroupsPage authHeader={authHeader}/>}/>

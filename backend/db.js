@@ -128,6 +128,51 @@ async function initDB() {
 
     CREATE INDEX IF NOT EXISTS idx_sent_emails_user ON sent_emails(user_id);
     CREATE INDEX IF NOT EXISTS idx_email_opens_sent ON email_opens(sent_email_id);
+
+    -- Background sending campaigns. A campaign is processed by a worker inside
+    -- the server process, so it keeps running after the browser is closed and
+    -- resumes on server restart. Status: running | paused | completed | stopped.
+    CREATE TABLE IF NOT EXISTS campaigns (
+      id              SERIAL PRIMARY KEY,
+      user_id         INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      name            VARCHAR(160),
+      status          VARCHAR(20) DEFAULT 'running',
+      total           INTEGER DEFAULT 0,
+      sent_count      INTEGER DEFAULT 0,
+      failed_count    INTEGER DEFAULT 0,
+      subject         TEXT,
+      body            TEXT,
+      is_html         BOOLEAN DEFAULT FALSE,
+      subject_group_id INTEGER,
+      body_group_id    INTEGER,
+      sender_group_id  INTEGER,
+      smtp_host       VARCHAR(100),
+      smtp_port       INTEGER,
+      smtp_user       VARCHAR(100),
+      smtp_pass       VARCHAR(255),
+      from_name       VARCHAR(100),
+      min_delay       NUMERIC DEFAULT 10,
+      max_delay       NUMERIC DEFAULT 20,
+      attachments     JSONB DEFAULT '[]',
+      base_url        TEXT,
+      created_at      TIMESTAMP DEFAULT NOW(),
+      finished_at     TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS campaign_recipients (
+      id           SERIAL PRIMARY KEY,
+      campaign_id  INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,
+      email        VARCHAR(255) NOT NULL,
+      status       VARCHAR(20) DEFAULT 'pending',
+      from_addr    VARCHAR(255),
+      subject      TEXT,
+      error        TEXT,
+      sent_at      TIMESTAMP,
+      idx          INTEGER DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_campaigns_user ON campaigns(user_id);
+    CREATE INDEX IF NOT EXISTS idx_camp_recipients ON campaign_recipients(campaign_id, status);
   `);
   console.log("✅ Database tables ready");
 }

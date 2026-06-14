@@ -8,7 +8,14 @@ const nodemailer = require("nodemailer");
 const bcrypt     = require("bcryptjs");
 const jwt        = require("jsonwebtoken");
 const crypto     = require("crypto");
+const XLSX       = require("xlsx");
 const { pool, initDB } = require("./db");
+const campaignRunner   = require("./campaignRunner");
+
+// Where campaign attachments are persisted so the background worker can read
+// them after the request that created the campaign is long gone.
+const uploadsDir = path.join(__dirname, "campaign_uploads");
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 
 const app    = express();
 const PORT   = process.env.PORT || 3001;
@@ -292,6 +299,40 @@ app.delete("/api/groups/:id/members/:memberId", authMiddleware, async (req, res)
   }
 });
 
+// ─── RECIPIENT GROUPS: Import from Excel/CSV ──────────────────────────────────
+// Accepts .xlsx / .xls / .csv. Scans every cell and extracts valid email
+// addresses from anywhere in the sheet, then adds the new ones to the group.
+app.post("/api/groups/:id/import", authMiddleware, upload.single("file"), async (req, res) => {
+  if (!req.file) return res.json({ ok: false, message: "No file uploaded." });
+  const g = await pool.query("SELECT id FROM email_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+  if (g.rows.length === 0) return res.json({ ok: false, message: "Group not found." });
+  try {
+    const wb = XLSX.read(req.file.buffer, { type: "buffer" });
+    const emailRe = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+    const found = new Set();
+    wb.SheetNames.forEach(name => {
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, blankrows: false, defval: "" });
+      rows.forEach(row => row.forEach(cell => {
+        const matches = String(cell).match(emailRe);
+        if (matches) matches.forEach(m => found.add(m.trim().toLowerCase()));
+      }));
+    });
+    if (found.size === 0) return res.json({ ok: false, message: "No email addresses found in the file." });
+
+    const existing    = await pool.query("SELECT email FROM email_group_members WHERE group_id=$1", [req.params.id]);
+    const existingSet = new Set(existing.rows.map(r => r.email.toLowerCase()));
+    let added = 0;
+    for (const email of found) {
+      if (existingSet.has(email)) continue;
+      await pool.query("INSERT INTO email_group_members (group_id, email) VALUES ($1,$2)", [req.params.id, email]);
+      existingSet.add(email); added++;
+    }
+    res.json({ ok: true, added, found: found.size, message: `${added} new email(s) added (${found.size} found in file).` });
+  } catch (err) {
+    res.json({ ok: false, message: `Could not read the file: ${err.message}` });
+  }
+});
+
 // ─── SENDER GROUPS: Create ────────────────────────────────────────────────────
 app.post("/api/sender-groups", authMiddleware, async (req, res) => {
   const { name, description } = req.body;
@@ -393,134 +434,176 @@ app.post("/api/sender-groups/:id/accounts/:accountId/test", authMiddleware, asyn
   }
 });
 
-// ─── Send Email ───────────────────────────────────────────────────────────────
-app.post("/api/send", authMiddleware, upload.array("attachments", 10), async (req, res) => {
-  const { smtpHost, smtpPort, smtpUser, smtpPass, fromName, to, subject, body, isHtml, minDelay, maxDelay, senderGroupId, subjectGroupId, bodyGroupId } = req.body;
+// ─── CAMPAIGNS: Create & start (runs in the background) ───────────────────────
+app.post("/api/campaigns", authMiddleware, upload.array("attachments", 10), async (req, res) => {
+  const { smtpHost, smtpPort, smtpUser, smtpPass, fromName, to, subject, body, isHtml, minDelay, maxDelay, senderGroupId, subjectGroupId, bodyGroupId, name } = req.body;
 
   if (!to) return res.json({ ok: false, message: "Recipient (To) is required." });
 
-  // Load subject pool if using a subject group, otherwise require a single subject
-  let subjectItems = null;
+  // Subject — group or single
   if (subjectGroupId) {
-    const si = await pool.query(
-      "SELECT si.* FROM subject_items si JOIN subject_groups sg ON sg.id = si.group_id WHERE si.group_id=$1 AND sg.user_id=$2",
-      [subjectGroupId, req.user.id]
-    );
+    const si = await pool.query("SELECT 1 FROM subject_items si JOIN subject_groups sg ON sg.id=si.group_id WHERE si.group_id=$1 AND sg.user_id=$2 LIMIT 1", [subjectGroupId, req.user.id]);
     if (si.rows.length === 0) return res.json({ ok: false, message: "Subject group has no subjects. Add subjects first." });
-    subjectItems = si.rows;
   } else if (!subject) {
     return res.json({ ok: false, message: "Subject is required." });
   }
 
-  // Load body pool if using a body group, otherwise require a single body
-  let bodyItems = null;
+  // Body — group or single
   if (bodyGroupId) {
-    const bi = await pool.query(
-      "SELECT bi.* FROM body_items bi JOIN body_groups bg ON bg.id = bi.group_id WHERE bi.group_id=$1 AND bg.user_id=$2",
-      [bodyGroupId, req.user.id]
-    );
+    const bi = await pool.query("SELECT 1 FROM body_items bi JOIN body_groups bg ON bg.id=bi.group_id WHERE bi.group_id=$1 AND bg.user_id=$2 LIMIT 1", [bodyGroupId, req.user.id]);
     if (bi.rows.length === 0) return res.json({ ok: false, message: "Body group has no bodies. Add bodies first." });
-    bodyItems = bi.rows;
   } else if (!body) {
     return res.json({ ok: false, message: "Message body is required." });
+  }
+
+  // Sender — group or single SMTP
+  if (senderGroupId) {
+    const g = await pool.query("SELECT 1 FROM sender_accounts sa JOIN sender_groups sg ON sg.id=sa.group_id WHERE sa.group_id=$1 AND sg.user_id=$2 LIMIT 1", [senderGroupId, req.user.id]);
+    if (g.rows.length === 0) return res.json({ ok: false, message: "Sender group has no accounts. Add SMTP accounts first." });
+  } else if (!smtpHost || !smtpUser || !smtpPass) {
+    return res.json({ ok: false, message: "SMTP credentials are required, or select a Sender Group." });
   }
 
   const recipients = parseRecipients(to);
   if (recipients.length === 0) return res.json({ ok: false, message: "No valid email addresses found." });
 
-  // Load sender accounts if using a sender group
-  let senderAccounts = null;
-  if (senderGroupId) {
-    const g = await pool.query(
-      "SELECT sa.* FROM sender_accounts sa JOIN sender_groups sg ON sg.id = sa.group_id WHERE sa.group_id=$1 AND sg.user_id=$2",
-      [senderGroupId, req.user.id]
+  const useHtml      = isHtml === "true" || isHtml === true;
+  const minS         = parseFloat(minDelay) || 10;
+  const maxS         = parseFloat(maxDelay) || 20;
+  const baseUrl      = publicBaseUrl(req);
+  const campaignName = ((name && name.trim()) || (subject && subject.trim()) || "Campaign").slice(0, 160);
+
+  try {
+    const ins = await pool.query(
+      `INSERT INTO campaigns
+         (user_id, name, status, total, subject, body, is_html, subject_group_id, body_group_id, sender_group_id,
+          smtp_host, smtp_port, smtp_user, smtp_pass, from_name, min_delay, max_delay, base_url)
+       VALUES ($1,$2,'running',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id`,
+      [req.user.id, campaignName, recipients.length,
+       subjectGroupId ? null : subject, bodyGroupId ? null : body, useHtml,
+       subjectGroupId || null, bodyGroupId || null, senderGroupId || null,
+       senderGroupId ? null : smtpHost, senderGroupId ? null : (parseInt(smtpPort, 10) || 587),
+       senderGroupId ? null : smtpUser, senderGroupId ? null : smtpPass, senderGroupId ? null : (fromName || ""),
+       minS, maxS, baseUrl]
     );
-    if (g.rows.length === 0) return res.json({ ok: false, message: "Sender group has no accounts. Add SMTP accounts first." });
-    senderAccounts = g.rows;
-  } else {
-    if (!smtpHost || !smtpUser || !smtpPass)
-      return res.json({ ok: false, message: "SMTP credentials are required." });
+    const campaignId = ins.rows[0].id;
+
+    // Persist attachments to disk so the background worker can read them later.
+    if (req.files && req.files.length > 0) {
+      const dir = path.join(uploadsDir, String(campaignId));
+      fs.mkdirSync(dir, { recursive: true });
+      const meta = req.files.map((f, i) => {
+        const dest = path.join(dir, `${i}_${f.originalname.replace(/[^a-zA-Z0-9._-]/g, "_")}`);
+        fs.writeFileSync(dest, f.buffer);
+        return { filename: f.originalname, path: dest, contentType: f.mimetype };
+      });
+      await pool.query("UPDATE campaigns SET attachments=$1 WHERE id=$2", [JSON.stringify(meta), campaignId]);
+    }
+
+    // Insert all recipients as 'pending' (chunked for large lists).
+    const chunk = 500;
+    for (let i = 0; i < recipients.length; i += chunk) {
+      const slice  = recipients.slice(i, i + chunk);
+      const values = [];
+      const params = [];
+      slice.forEach((email, j) => {
+        const b = j * 3;
+        params.push(campaignId, email, i + j);
+        values.push(`($${b + 1},$${b + 2},$${b + 3})`);
+      });
+      await pool.query(`INSERT INTO campaign_recipients (campaign_id, email, idx) VALUES ${values.join(",")}`, params);
+    }
+
+    campaignRunner.startCampaign(campaignId);
+    res.json({ ok: true, campaignId, total: recipients.length, message: `Campaign started — sending ${recipients.length} email(s) in the background.` });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
   }
+});
 
-  const useHtml = isHtml === "true" || isHtml === true;
-  const minS    = parseFloat(minDelay) || 10;
-  const maxS    = parseFloat(maxDelay) || 20;
-  const attachments = req.files && req.files.length > 0
-    ? req.files.map(f => ({ filename: f.originalname, content: f.buffer, contentType: f.mimetype }))
-    : [];
-
-  const results = [];
-  const baseUrl = publicBaseUrl(req);
-
-  for (let i = 0; i < recipients.length; i++) {
-    if (i > 0) await randomDelay(minS, maxS);
-    const recipient = recipients[i];
-
-    // Pick random sender account from group OR use single SMTP
-    let sender;
-    if (senderAccounts) {
-      sender = pickRandom(senderAccounts);
-    } else {
-      sender = { host: smtpHost, port: smtpPort, username: smtpUser, password: smtpPass, from_name: fromName };
-    }
-
-    // Pick subject and body independently — random from each group, or the single value
-    let emailSubject, emailBody, emailIsHtml;
-    if (subjectItems) {
-      emailSubject = pickRandom(subjectItems).subject;
-    } else {
-      emailSubject = subject.trim();
-    }
-    if (bodyItems) {
-      const pickedBody = pickRandom(bodyItems);
-      emailBody   = pickedBody.body;
-      emailIsHtml = pickedBody.is_html;
-    } else {
-      emailBody   = body;
-      emailIsHtml = useHtml;
-    }
-
-    const fromAddr = sender.username.trim();
-    const fromFull = sender.from_name ? `"${sender.from_name}" <${fromAddr}>` : fromAddr;
-
-    // Unique tracking id + invisible pixel appended to the HTML body so opens
-    // can be detected. Plain-text emails get an HTML part carrying the pixel.
-    const trackingId = crypto.randomUUID();
-    const pixel = `<img src="${baseUrl}/api/track/open/${trackingId}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden" />`;
-    const htmlBody = (emailIsHtml ? emailBody : emailBody.replace(/\n/g, "<br>")) + pixel;
-
-    const mailOptions = {
-      from: fromFull, to: recipient, subject: emailSubject,
-      text: emailIsHtml ? emailBody.replace(/<[^>]+>/g, "") : emailBody,
-      html: htmlBody,
-    };
-    if (attachments.length > 0) mailOptions.attachments = attachments;
-
-    try {
-      const transporter = createTransporter(sender);
-      const info = await transporter.sendMail(mailOptions);
-      console.log(`✅ [user:${req.user.id}] ${fromAddr} → ${recipient} | ${info.messageId}`);
-      // Record the sent email so its opens can be tracked.
-      try {
-        await pool.query(
-          "INSERT INTO sent_emails (user_id, tracking_id, recipient, subject, from_addr) VALUES ($1,$2,$3,$4,$5)",
-          [req.user.id, trackingId, recipient, emailSubject, fromAddr]
-        );
-      } catch (e) { console.error("Failed to record sent email:", e.message); }
-      results.push({ email: recipient, ok: true, from: fromAddr, subject: emailSubject, message: "Sent successfully" });
-    } catch (err) {
-      console.error(`❌ [user:${req.user.id}] ${fromAddr} → ${recipient}: ${err.message}`);
-      results.push({ email: recipient, ok: false, from: fromAddr, subject: emailSubject, message: err.message });
-    }
+// ─── CAMPAIGNS: List ──────────────────────────────────────────────────────────
+app.get("/api/campaigns", authMiddleware, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT id, name, status, total, sent_count, failed_count, created_at, finished_at
+       FROM campaigns WHERE user_id=$1 ORDER BY created_at DESC LIMIT 200`,
+      [req.user.id]
+    );
+    res.json({ ok: true, campaigns: r.rows });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
   }
+});
 
-  const successCount = results.filter(r => r.ok).length;
-  res.json({
-    ok: results.filter(r => !r.ok).length === 0,
-    total: recipients.length, success: successCount,
-    failed: recipients.length - successCount,
-    results, message: `${successCount} of ${recipients.length} emails sent successfully.`,
-  });
+// ─── CAMPAIGNS: Detail + recent results ───────────────────────────────────────
+app.get("/api/campaigns/:id", authMiddleware, async (req, res) => {
+  try {
+    const c = await pool.query(
+      `SELECT id, name, status, total, sent_count, failed_count, is_html, min_delay, max_delay, created_at, finished_at
+       FROM campaigns WHERE id=$1 AND user_id=$2`,
+      [req.params.id, req.user.id]
+    );
+    if (c.rows.length === 0) return res.json({ ok: false, message: "Campaign not found." });
+    const recent = await pool.query(
+      `SELECT email, status, from_addr, subject, error, sent_at FROM campaign_recipients
+       WHERE campaign_id=$1 AND status <> 'pending' ORDER BY sent_at DESC NULLS LAST, id DESC LIMIT 100`,
+      [req.params.id]
+    );
+    res.json({ ok: true, campaign: c.rows[0], recent: recent.rows });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── CAMPAIGNS: Pause ─────────────────────────────────────────────────────────
+app.post("/api/campaigns/:id/pause", authMiddleware, async (req, res) => {
+  try {
+    const r = await pool.query("UPDATE campaigns SET status='paused' WHERE id=$1 AND user_id=$2 AND status='running' RETURNING id", [req.params.id, req.user.id]);
+    if (r.rows.length === 0) return res.json({ ok: false, message: "Campaign is not running." });
+    campaignRunner.signalPause(req.params.id);
+    res.json({ ok: true, message: "Campaign paused." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── CAMPAIGNS: Resume ────────────────────────────────────────────────────────
+app.post("/api/campaigns/:id/resume", authMiddleware, async (req, res) => {
+  try {
+    const r = await pool.query("UPDATE campaigns SET status='running' WHERE id=$1 AND user_id=$2 AND status='paused' RETURNING id", [req.params.id, req.user.id]);
+    if (r.rows.length === 0) return res.json({ ok: false, message: "Campaign is not paused." });
+    campaignRunner.startCampaign(req.params.id);
+    res.json({ ok: true, message: "Campaign resumed." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── CAMPAIGNS: Stop ──────────────────────────────────────────────────────────
+app.post("/api/campaigns/:id/stop", authMiddleware, async (req, res) => {
+  try {
+    const r = await pool.query("UPDATE campaigns SET status='stopped', finished_at=NOW() WHERE id=$1 AND user_id=$2 AND status IN ('running','paused') RETURNING id", [req.params.id, req.user.id]);
+    if (r.rows.length === 0) return res.json({ ok: false, message: "Campaign is not active." });
+    campaignRunner.signalStop(req.params.id);
+    res.json({ ok: true, message: "Campaign stopped." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── CAMPAIGNS: Delete ────────────────────────────────────────────────────────
+app.delete("/api/campaigns/:id", authMiddleware, async (req, res) => {
+  try {
+    const owned = await pool.query("SELECT id FROM campaigns WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    if (owned.rows.length === 0) return res.json({ ok: false, message: "Campaign not found." });
+    campaignRunner.signalStop(req.params.id);
+    await pool.query("UPDATE campaigns SET status='stopped' WHERE id=$1", [req.params.id]); // ensure the loop exits
+    await pool.query("DELETE FROM campaigns WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    try { fs.rmSync(path.join(uploadsDir, String(req.params.id)), { recursive: true, force: true }); } catch {}
+    res.json({ ok: true, message: "Campaign deleted." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
 });
 
 // ─── SUBJECT GROUPS: Create ───────────────────────────────────────────────────
@@ -774,6 +857,8 @@ app.get("*", (req, res) => {
 // ─── Start ────────────────────────────────────────────────────────────────────
 initDB().then(() => {
   app.listen(PORT, "0.0.0.0", () => console.log(`✉  MailBlast running → http://localhost:${PORT}`));
+  // Resume any campaigns that were mid-send when the server last stopped.
+  campaignRunner.resumeAll();
 }).catch(err => {
   console.error("❌ Database connection failed:", err.message);
   process.exit(1);
