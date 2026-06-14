@@ -3,7 +3,7 @@ import {
   Zap, Settings2, Mail, Paperclip, Send, Wifi, Eye, EyeOff,
   X, Upload, Loader2, AlertCircle, Terminal, RefreshCw,
   Clock, Users, LogOut, User, Save, Plus, Trash2, ChevronRight,
-  ArrowLeft, FolderOpen, UserPlus, AtSign, CheckCircle, FileText, Edit2,
+  ArrowLeft, FolderOpen, UserPlus, AtSign, CheckCircle, FileText, Edit2, Type,
 } from "lucide-react";
 
 const onFocus = e => e.target.style.borderColor = "var(--accent)";
@@ -98,6 +98,22 @@ function Toast({ msg }) {
 
 function parseEmails(raw) {
   return raw.split(/[\n,]+/).map(e => e.trim()).filter(e => e.includes("@"));
+}
+
+// Small Single / Group pill toggle used in Compose for subject & body
+function ModeToggle({ value, onChange }) {
+  const pill = (active, accent) => ({
+    padding:"3px 12px", borderRadius:100, border:"1px solid", cursor:"pointer", fontSize:11, fontWeight:600, transition:"all 0.15s",
+    background: active ? (accent ? "rgba(139,92,246,0.12)" : "var(--accent-dim)") : "transparent",
+    borderColor: active ? (accent ? "#8b5cf6" : "var(--accent)") : "var(--border2)",
+    color: active ? (accent ? "#8b5cf6" : "var(--accent)") : "var(--text3)",
+  });
+  return (
+    <div style={{ display:"flex", gap:5 }}>
+      <button type="button" onClick={() => onChange(false)} style={pill(!value, false)}>Single</button>
+      <button type="button" onClick={() => onChange(true)}  style={pill(value, true)}>Group</button>
+    </div>
+  );
 }
 
 // ─── AUTH PAGE ────────────────────────────────────────────────────────────────
@@ -666,10 +682,15 @@ function ComposePage({ authHeader, prefilledTo, setPrefilledTo }) {
   const [senderGroupId,  setSenderGroupId]  = useState("");
   const [useSenderGroup, setUseSenderGroup] = useState(false);
 
-  // Content groups
-  const [contentGroups,   setContentGroups]   = useState([]);
-  const [contentGroupId,  setContentGroupId]  = useState("");
-  const [useContentGroup, setUseContentGroup] = useState(false);
+  // Subject groups
+  const [subjectGroups,   setSubjectGroups]   = useState([]);
+  const [subjectGroupId,  setSubjectGroupId]  = useState("");
+  const [useSubjectGroup, setUseSubjectGroup] = useState(false);
+
+  // Body groups
+  const [bodyGroups,   setBodyGroups]   = useState([]);
+  const [bodyGroupId,  setBodyGroupId]  = useState("");
+  const [useBodyGroup, setUseBodyGroup] = useState(false);
 
   const [to,       setTo]       = useState("");
   const [subject,  setSubject]  = useState("");
@@ -712,10 +733,16 @@ function ComposePage({ authHeader, prefilledTo, setPrefilledTo }) {
       .then(data => { if (data.ok) setSenderGroups(data.groups); })
       .catch(() => {});
 
-    // Load content groups
-    fetch("/api/content-groups", { headers: authHeader })
+    // Load subject groups
+    fetch("/api/subject-groups", { headers: authHeader })
       .then(r => r.json())
-      .then(data => { if (data.ok) setContentGroups(data.groups); })
+      .then(data => { if (data.ok) setSubjectGroups(data.groups); })
+      .catch(() => {});
+
+    // Load body groups
+    fetch("/api/body-groups", { headers: authHeader })
+      .then(r => r.json())
+      .then(data => { if (data.ok) setBodyGroups(data.groups); })
       .catch(() => {});
   }, []);
 
@@ -758,9 +785,10 @@ function ComposePage({ authHeader, prefilledTo, setPrefilledTo }) {
     if (!useSenderGroup && (!smtpHost || !smtpUser || !smtpPass)) return addLog("error", "❌ Fill in SMTP credentials or select a Sender Group.");
     if (useSenderGroup && !senderGroupId) return addLog("error", "❌ Select a Sender Group.");
     if (!to)      return addLog("error", "❌ Enter at least one recipient.");
-    if (!subject && !useContentGroup) return addLog("error", "❌ Enter a subject or select a Content Group.");
-    if (!body && !useContentGroup)    return addLog("error", "❌ Write a message body or select a Content Group.");
-    if (useContentGroup && !contentGroupId) return addLog("error", "❌ Select a Content Group.");
+    if (useSubjectGroup && !subjectGroupId) return addLog("error", "❌ Select a Subject Group.");
+    if (!useSubjectGroup && !subject)       return addLog("error", "❌ Enter a subject or select a Subject Group.");
+    if (useBodyGroup && !bodyGroupId)       return addLog("error", "❌ Select a Body Group.");
+    if (!useBodyGroup && !body)             return addLog("error", "❌ Write a message body or select a Body Group.");
     if (recipientList.length === 0) return addLog("error", "❌ No valid emails found.");
 
     const min = parseFloat(minDelay)||30;
@@ -784,12 +812,16 @@ function ComposePage({ authHeader, prefilledTo, setPrefilledTo }) {
       fd.append("senderGroupId", senderGroupId);
     }
     fd.append("to", to);
-    if (useContentGroup && contentGroupId) {
-      fd.append("contentGroupId", contentGroupId);
+    if (useSubjectGroup && subjectGroupId) {
+      fd.append("subjectGroupId", subjectGroupId);
     } else {
       fd.append("subject", subject);
-      fd.append("body",    body);
-      fd.append("isHtml",  isHtml ? "true" : "false");
+    }
+    if (useBodyGroup && bodyGroupId) {
+      fd.append("bodyGroupId", bodyGroupId);
+    } else {
+      fd.append("body",   body);
+      fd.append("isHtml", isHtml ? "true" : "false");
     }
     fd.append("minDelay", min);    fd.append("maxDelay", max);
     attachments.forEach(f => fd.append("attachments", f, f.name));
@@ -973,68 +1005,69 @@ function ComposePage({ authHeader, prefilledTo, setPrefilledTo }) {
             <div style={{ fontSize:11, color:"var(--text3)", marginTop:4 }}>One per line or comma-separated.</div>
           </Field>
 
-          {/* Content Mode Toggle */}
+          {/* ── Subject ── */}
           <div style={{ marginBottom:16 }}>
-            <label style={S.label}>Content Mode</label>
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6 }}>
-              <button onClick={() => setUseContentGroup(false)}
-                style={{ padding:"8px", borderRadius:"var(--radius)", border:"1px solid", cursor:"pointer", fontSize:12, fontWeight:600, transition:"all 0.15s",
-                  background: !useContentGroup ? "var(--accent-dim)" : "transparent",
-                  borderColor: !useContentGroup ? "var(--accent)" : "var(--border2)",
-                  color: !useContentGroup ? "var(--accent)" : "var(--text3)" }}>
-                Single Content
-              </button>
-              <button onClick={() => setUseContentGroup(true)}
-                style={{ padding:"8px", borderRadius:"var(--radius)", border:"1px solid", cursor:"pointer", fontSize:12, fontWeight:600, transition:"all 0.15s",
-                  background: useContentGroup ? "rgba(139,92,246,0.1)" : "transparent",
-                  borderColor: useContentGroup ? "#8b5cf6" : "var(--border2)",
-                  color: useContentGroup ? "#8b5cf6" : "var(--text3)" }}>
-                Content Group
-              </button>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:6 }}>
+              <label style={{ ...S.label, marginBottom:0 }}>Subject</label>
+              <ModeToggle value={useSubjectGroup} onChange={setUseSubjectGroup}/>
             </div>
+            {!useSubjectGroup ? (
+              <input value={subject} onChange={e => setSubject(e.target.value)} placeholder="Enter subject..."
+                style={{ ...S.input, fontFamily:"var(--font-display)" }} onFocus={onFocus} onBlur={onBlur}/>
+            ) : subjectGroups.length === 0 ? (
+              <div style={{ padding:"14px", background:"var(--surface2)", borderRadius:"var(--radius)", fontSize:12, color:"var(--text3)", lineHeight:1.6 }}>
+                No subject groups yet.<br/>Go to <strong style={{ color:"#8b5cf6" }}>Subject Groups</strong> page to create one.
+              </div>
+            ) : (
+              <>
+                <select value={subjectGroupId} onChange={e => setSubjectGroupId(e.target.value)} style={S.select} onFocus={onFocus} onBlur={onBlur}>
+                  <option value="">— Select a subject group —</option>
+                  {subjectGroups.map(g => <option key={g.id} value={g.id}>{g.name} ({g.item_count} subjects)</option>)}
+                </select>
+                {subjectGroupId && (
+                  <div style={{ marginTop:8, padding:"8px 12px", background:"rgba(139,92,246,0.06)", border:"1px solid rgba(139,92,246,0.2)", borderRadius:"var(--radius)", fontSize:12, color:"#8b5cf6", lineHeight:1.6 }}>
+                    ✓ Each recipient gets a randomly picked subject from this group
+                  </div>
+                )}
+              </>
+            )}
           </div>
 
-          {/* Single subject/body */}
-          {!useContentGroup && (
-            <>
-              <TextInput label="Subject" value={subject} onChange={setSubject} placeholder="Enter subject..." mono={false}/>
-              <Field label="Message Body">
+          {/* ── Message Body ── */}
+          <div style={{ marginBottom:16 }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:6 }}>
+              <label style={{ ...S.label, marginBottom:0 }}>Message Body</label>
+              <ModeToggle value={useBodyGroup} onChange={setUseBodyGroup}/>
+            </div>
+            {!useBodyGroup ? (
+              <>
                 <textarea value={body} onChange={e => setBody(e.target.value)}
                   placeholder={isHtml?"<p>Hello,</p>\n<p>Your message here...</p>":"Hello,\n\nYour message here...\n\nBest regards"}
                   style={{ ...S.textarea, minHeight:200 }} onFocus={onFocus} onBlur={onBlur}/>
-              </Field>
-              <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", marginTop:-6 }}>
-                <input type="checkbox" checked={isHtml} onChange={e => setIsHtml(e.target.checked)} style={{ accentColor:"var(--accent)" }}/>
-                <span style={{ fontSize:12, color:"var(--text2)" }}>Send as HTML</span>
-                {isHtml && <span style={{ ...S.chip, background:"var(--accent-dim)", color:"var(--accent)" }}>HTML mode</span>}
-              </label>
-            </>
-          )}
-
-          {/* Content Group picker */}
-          {useContentGroup && (
-            <Field label="Content Group">
-              {contentGroups.length === 0 ? (
-                <div style={{ padding:"14px", background:"var(--surface2)", borderRadius:"var(--radius)", fontSize:12, color:"var(--text3)", lineHeight:1.6 }}>
-                  No content groups yet.<br/>Go to <strong style={{ color:"#8b5cf6" }}>Content Groups</strong> page to create one with subject/body variations.
-                </div>
-              ) : (
-                <>
-                  <select value={contentGroupId} onChange={e => setContentGroupId(e.target.value)} style={S.select} onFocus={onFocus} onBlur={onBlur}>
-                    <option value="">— Select a content group —</option>
-                    {contentGroups.map(g => (
-                      <option key={g.id} value={g.id}>{g.name} ({g.variation_count} variations)</option>
-                    ))}
-                  </select>
-                  {contentGroupId && (
-                    <div style={{ marginTop:8, padding:"10px 12px", background:"rgba(139,92,246,0.06)", border:"1px solid rgba(139,92,246,0.2)", borderRadius:"var(--radius)", fontSize:12, color:"#8b5cf6", lineHeight:1.7 }}>
-                      ✓ Each recipient gets a randomly picked subject + body from this group
-                    </div>
-                  )}
-                </>
-              )}
-            </Field>
-          )}
+                <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", marginTop:8 }}>
+                  <input type="checkbox" checked={isHtml} onChange={e => setIsHtml(e.target.checked)} style={{ accentColor:"var(--accent)" }}/>
+                  <span style={{ fontSize:12, color:"var(--text2)" }}>Send as HTML</span>
+                  {isHtml && <span style={{ ...S.chip, background:"var(--accent-dim)", color:"var(--accent)" }}>HTML mode</span>}
+                </label>
+              </>
+            ) : bodyGroups.length === 0 ? (
+              <div style={{ padding:"14px", background:"var(--surface2)", borderRadius:"var(--radius)", fontSize:12, color:"var(--text3)", lineHeight:1.6 }}>
+                No body groups yet.<br/>Go to <strong style={{ color:"#8b5cf6" }}>Body Groups</strong> page to create one.
+              </div>
+            ) : (
+              <>
+                <select value={bodyGroupId} onChange={e => setBodyGroupId(e.target.value)} style={S.select} onFocus={onFocus} onBlur={onBlur}>
+                  <option value="">— Select a body group —</option>
+                  {bodyGroups.map(g => <option key={g.id} value={g.id}>{g.name} ({g.item_count} bodies)</option>)}
+                </select>
+                {bodyGroupId && (
+                  <div style={{ marginTop:8, padding:"8px 12px", background:"rgba(139,92,246,0.06)", border:"1px solid rgba(139,92,246,0.2)", borderRadius:"var(--radius)", fontSize:12, color:"#8b5cf6", lineHeight:1.6 }}>
+                    ✓ Each recipient gets a randomly picked body (with its own HTML setting) from this group
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         </div>
 
         {sending && progress && progress.total > 1 && (
@@ -1074,12 +1107,14 @@ function ComposePage({ authHeader, prefilledTo, setPrefilledTo }) {
   );
 }
 
-// ─── CONTENT GROUPS PAGE ─────────────────────────────────────────────────────
-function ContentGroupsPage({ authHeader }) {
+// ─── ITEM GROUPS PAGE (generic — used for both Subject Groups & Body Groups) ──
+// cfg = { apiBase, title, subtitle, createTitle, createDesc, noun, nounPlural,
+//         field, multiline, hasHtml, color, colorDim, colorFaint, icon }
+function ItemGroupsPage({ authHeader, cfg }) {
   const [groups,      setGroups]      = useState([]);
   const [view,        setView]        = useState("list"); // list | create | detail
   const [activeGroup, setActiveGroup] = useState(null);
-  const [variations,  setVariations]  = useState([]);
+  const [items,       setItems]       = useState([]);
   const [loading,     setLoading]     = useState(false);
   const [msg,         setMsg]         = useState(null);
 
@@ -1087,19 +1122,18 @@ function ContentGroupsPage({ authHeader }) {
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
 
-  // Add/edit variation form
-  const [varSubject, setVarSubject] = useState("");
-  const [varBody,    setVarBody]    = useState("");
-  const [varHtml,    setVarHtml]    = useState(false);
-  const [editingId,  setEditingId]  = useState(null);
-  const [saving,     setSaving]     = useState(false);
+  // Add/edit item form
+  const [itemText,  setItemText]  = useState("");
+  const [itemHtml,  setItemHtml]  = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [saving,    setSaving]    = useState(false);
 
   const showMsg = (type, text) => { setMsg({ type, text }); setTimeout(() => setMsg(null), 3000); };
 
   const loadGroups = async () => {
     setLoading(true);
     try {
-      const res  = await fetch("/api/content-groups", { headers: authHeader });
+      const res  = await fetch(cfg.apiBase, { headers: authHeader });
       const data = await res.json();
       if (data.ok) setGroups(data.groups);
     } catch {}
@@ -1108,9 +1142,9 @@ function ContentGroupsPage({ authHeader }) {
 
   const loadGroup = async (g) => {
     try {
-      const res  = await fetch(`/api/content-groups/${g.id}`, { headers: authHeader });
+      const res  = await fetch(`${cfg.apiBase}/${g.id}`, { headers: authHeader });
       const data = await res.json();
-      if (data.ok) { setActiveGroup(data.group); setVariations(data.variations); setView("detail"); }
+      if (data.ok) { setActiveGroup(data.group); setItems(data.items); setView("detail"); }
     } catch {}
   };
 
@@ -1119,64 +1153,60 @@ function ContentGroupsPage({ authHeader }) {
   const handleCreate = async () => {
     if (!newName.trim()) return showMsg("error", "Group name is required.");
     try {
-      const res  = await fetch("/api/content-groups", { method:"POST", headers:{ ...authHeader, "Content-Type":"application/json" }, body:JSON.stringify({ name:newName, description:newDesc }) });
+      const res  = await fetch(cfg.apiBase, { method:"POST", headers:{ ...authHeader, "Content-Type":"application/json" }, body:JSON.stringify({ name:newName, description:newDesc }) });
       const data = await res.json();
-      if (data.ok) { showMsg("success", "Content group created!"); setNewName(""); setNewDesc(""); setView("list"); loadGroups(); }
+      if (data.ok) { showMsg("success", `${cfg.title.slice(0,-1)} created!`); setNewName(""); setNewDesc(""); setView("list"); loadGroups(); }
       else showMsg("error", data.message);
     } catch { showMsg("error", "Failed to create group."); }
   };
 
   const handleDelete = async (id) => {
-    if (!confirm("Delete this content group and all its variations?")) return;
+    if (!confirm(`Delete this group and all its ${cfg.nounPlural}?`)) return;
     try {
-      await fetch(`/api/content-groups/${id}`, { method:"DELETE", headers: authHeader });
+      await fetch(`${cfg.apiBase}/${id}`, { method:"DELETE", headers: authHeader });
       showMsg("success", "Group deleted."); loadGroups();
     } catch {}
   };
 
-  const resetForm = () => { setVarSubject(""); setVarBody(""); setVarHtml(false); setEditingId(null); };
+  const resetForm = () => { setItemText(""); setItemHtml(false); setEditingId(null); };
 
-  const handleSaveVariation = async () => {
-    if (!varSubject.trim()) return showMsg("error", "Subject is required.");
-    if (!varBody.trim())    return showMsg("error", "Body is required.");
+  const buildPayload = () => ({ [cfg.field]: itemText, ...(cfg.hasHtml ? { isHtml: itemHtml } : {}) });
+
+  const handleSaveItem = async () => {
+    if (!itemText.trim()) return showMsg("error", `${cfg.noun[0].toUpperCase()+cfg.noun.slice(1)} is required.`);
     setSaving(true);
     try {
       if (editingId) {
-        // Update existing
-        const res  = await fetch(`/api/content-groups/${activeGroup.id}/variations/${editingId}`, {
-          method:"PUT", headers:{ ...authHeader, "Content-Type":"application/json" },
-          body: JSON.stringify({ subject:varSubject, body:varBody, isHtml:varHtml }),
+        const res  = await fetch(`${cfg.apiBase}/${activeGroup.id}/items/${editingId}`, {
+          method:"PUT", headers:{ ...authHeader, "Content-Type":"application/json" }, body: JSON.stringify(buildPayload()),
         });
         const data = await res.json();
-        if (data.ok) { showMsg("success", "Variation updated."); resetForm(); loadGroup(activeGroup); }
+        if (data.ok) { showMsg("success", `${cfg.noun[0].toUpperCase()+cfg.noun.slice(1)} updated.`); resetForm(); loadGroup(activeGroup); }
         else showMsg("error", data.message);
       } else {
-        // Add new
-        if (variations.length >= 20) return showMsg("error", "Maximum 20 variations allowed.");
-        const res  = await fetch(`/api/content-groups/${activeGroup.id}/variations`, {
-          method:"POST", headers:{ ...authHeader, "Content-Type":"application/json" },
-          body: JSON.stringify({ subject:varSubject, body:varBody, isHtml:varHtml }),
+        if (items.length >= 20) return showMsg("error", "Maximum 20 allowed.");
+        const res  = await fetch(`${cfg.apiBase}/${activeGroup.id}/items`, {
+          method:"POST", headers:{ ...authHeader, "Content-Type":"application/json" }, body: JSON.stringify(buildPayload()),
         });
         const data = await res.json();
-        if (data.ok) { showMsg("success", "Variation added!"); resetForm(); loadGroup(activeGroup); }
+        if (data.ok) { showMsg("success", `${cfg.noun[0].toUpperCase()+cfg.noun.slice(1)} added!`); resetForm(); loadGroup(activeGroup); }
         else showMsg("error", data.message);
       }
-    } catch { showMsg("error", "Failed to save variation."); }
+    } catch { showMsg("error", "Failed to save."); }
     setSaving(false);
   };
 
-  const handleEdit = (v) => {
-    setEditingId(v.id);
-    setVarSubject(v.subject);
-    setVarBody(v.body);
-    setVarHtml(v.is_html);
+  const handleEdit = (it) => {
+    setEditingId(it.id);
+    setItemText(it[cfg.field]);
+    if (cfg.hasHtml) setItemHtml(it.is_html);
   };
 
-  const handleDeleteVariation = async (varId) => {
+  const handleDeleteItem = async (itemId) => {
     try {
-      await fetch(`/api/content-groups/${activeGroup.id}/variations/${varId}`, { method:"DELETE", headers: authHeader });
-      setVariations(p => p.filter(v => v.id !== varId));
-      showMsg("success", "Variation deleted.");
+      await fetch(`${cfg.apiBase}/${activeGroup.id}/items/${itemId}`, { method:"DELETE", headers: authHeader });
+      setItems(p => p.filter(it => it.id !== itemId));
+      showMsg("success", "Deleted.");
     } catch {}
   };
 
@@ -1189,20 +1219,18 @@ function ContentGroupsPage({ authHeader }) {
         <>
           <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:24 }}>
             <div>
-              <div style={{ fontWeight:800, fontSize:22, letterSpacing:"-0.5px" }}>Content Groups</div>
-              <div style={{ color:"var(--text3)", fontSize:13, marginTop:3 }}>
-                Add up to 20 subject + body variations per group. Each recipient gets a randomly picked variation.
-              </div>
+              <div style={{ fontWeight:800, fontSize:22, letterSpacing:"-0.5px" }}>{cfg.title}</div>
+              <div style={{ color:"var(--text3)", fontSize:13, marginTop:3 }}>{cfg.subtitle}</div>
             </div>
-            <button onClick={() => setView("create")} style={{ ...S.btnPrimary }}><Plus size={15}/> New Content Group</button>
+            <button onClick={() => setView("create")} style={{ ...S.btnPrimary }}><Plus size={15}/> New {cfg.title.slice(0,-1)}</button>
           </div>
 
           {loading && <div style={{ color:"var(--text3)", fontSize:13 }}>Loading...</div>}
           {!loading && groups.length === 0 && (
             <div style={{ textAlign:"center", padding:"60px 0", color:"var(--text3)" }}>
-              <FileText size={40} style={{ opacity:0.3, display:"block", margin:"0 auto 12px" }}/>
-              <div style={{ fontSize:15, fontWeight:600, marginBottom:6 }}>No content groups yet</div>
-              <div style={{ fontSize:13 }}>Create a group and add multiple subject/body variations to rotate through.</div>
+              {cfg.icon(40, 0.3)}
+              <div style={{ fontSize:15, fontWeight:600, marginBottom:6, marginTop:12 }}>No {cfg.title.toLowerCase()} yet</div>
+              <div style={{ fontSize:13 }}>Create a group and add multiple {cfg.nounPlural} to rotate through.</div>
             </div>
           )}
 
@@ -1211,14 +1239,14 @@ function ContentGroupsPage({ authHeader }) {
               <div key={g.id} style={{ display:"flex", alignItems:"center", gap:16, padding:"16px 20px", background:"var(--surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-lg)", transition:"border-color 0.15s" }}
                 onMouseEnter={e => e.currentTarget.style.borderColor="var(--border2)"}
                 onMouseLeave={e => e.currentTarget.style.borderColor="var(--border)"}>
-                <div style={{ width:40, height:40, background:"rgba(139,92,246,0.15)", borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
-                  <FileText size={18} color="#8b5cf6"/>
+                <div style={{ width:40, height:40, background:cfg.colorDim, borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+                  {cfg.icon(18)}
                 </div>
                 <div style={{ flex:1, minWidth:0 }}>
                   <div style={{ fontWeight:700, fontSize:15 }}>{g.name}</div>
                   {g.description && <div style={{ fontSize:12, color:"var(--text3)", marginTop:2 }}>{g.description}</div>}
                   <div style={{ fontSize:11, color:"var(--text3)", marginTop:4, fontFamily:"var(--font-mono)" }}>
-                    {g.variation_count}/20 variations · {new Date(g.created_at).toLocaleDateString()}
+                    {g.item_count}/20 {cfg.nounPlural} · {new Date(g.created_at).toLocaleDateString()}
                   </div>
                 </div>
                 <div style={{ display:"flex", gap:8 }}>
@@ -1242,12 +1270,12 @@ function ContentGroupsPage({ authHeader }) {
         <>
           <button onClick={() => setView("list")} style={{ ...S.btnSecondary, marginBottom:24, width:"fit-content" }}><ArrowLeft size={13}/> Back</button>
           <div style={{ maxWidth:520 }}>
-            <div style={{ fontWeight:800, fontSize:22, marginBottom:6 }}>Create Content Group</div>
-            <div style={{ color:"var(--text3)", fontSize:13, marginBottom:24 }}>Name your group then add up to 20 subject/body variations.</div>
+            <div style={{ fontWeight:800, fontSize:22, marginBottom:6 }}>Create {cfg.title.slice(0,-1)}</div>
+            <div style={{ color:"var(--text3)", fontSize:13, marginBottom:24 }}>Name your group then add up to 20 {cfg.nounPlural}.</div>
             <div style={S.card}>
-              <TextInput label="Group Name" value={newName} onChange={setNewName} placeholder="e.g. Summer Campaign Variations" mono={false}/>
+              <TextInput label="Group Name" value={newName} onChange={setNewName} placeholder={cfg.namePlaceholder} mono={false}/>
               <Field label="Description (optional)">
-                <input value={newDesc} onChange={e => setNewDesc(e.target.value)} placeholder="What campaign is this for?"
+                <input value={newDesc} onChange={e => setNewDesc(e.target.value)} placeholder="What is this group for?"
                   style={{ ...S.input, fontFamily:"var(--font-display)" }} onFocus={onFocus} onBlur={onBlur}/>
               </Field>
               <div style={{ display:"flex", gap:8 }}>
@@ -1268,8 +1296,8 @@ function ContentGroupsPage({ authHeader }) {
               <div style={{ fontWeight:800, fontSize:22 }}>{activeGroup.name}</div>
               {activeGroup.description && <div style={{ color:"var(--text3)", fontSize:13 }}>{activeGroup.description}</div>}
             </div>
-            <span style={{ ...S.chip, background:"rgba(139,92,246,0.15)", color:"#8b5cf6", fontSize:13, padding:"4px 12px" }}>
-              {variations.length}/20 variations
+            <span style={{ ...S.chip, background:cfg.colorDim, color:cfg.color, fontSize:13, padding:"4px 12px" }}>
+              {items.length}/20 {cfg.nounPlural}
             </span>
           </div>
 
@@ -1278,8 +1306,8 @@ function ContentGroupsPage({ authHeader }) {
             {/* Add/Edit form */}
             <div style={S.card}>
               <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:16 }}>
-                {editingId ? <Edit2 size={15} color="#8b5cf6"/> : <Plus size={15} color="#8b5cf6"/>}
-                <span style={{ fontWeight:700, fontSize:15 }}>{editingId ? "Edit Variation" : "Add Variation"}</span>
+                {editingId ? <Edit2 size={15} color={cfg.color}/> : <Plus size={15} color={cfg.color}/>}
+                <span style={{ fontWeight:700, fontSize:15 }}>{editingId ? `Edit ${cfg.noun}` : `Add ${cfg.noun}`}</span>
                 {editingId && (
                   <button onClick={resetForm} style={{ ...S.btnSecondary, padding:"3px 10px", fontSize:11, marginLeft:"auto" }}>
                     <X size={11}/> Cancel Edit
@@ -1287,70 +1315,79 @@ function ContentGroupsPage({ authHeader }) {
                 )}
               </div>
 
-              <TextInput label="Subject Line" value={varSubject} onChange={setVarSubject} placeholder="Enter subject line..." mono={false}/>
+              {cfg.multiline ? (
+                <>
+                  <Field label="Body Text">
+                    <textarea value={itemText} onChange={e => setItemText(e.target.value)}
+                      placeholder={itemHtml ? "<p>Hello,</p>\n<p>Your message here...</p>" : "Hello,\n\nYour message here...\n\nBest regards"}
+                      style={{ ...S.textarea, minHeight:200 }} onFocus={onFocus} onBlur={onBlur}/>
+                  </Field>
+                  <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", marginBottom:14 }}>
+                    <input type="checkbox" checked={itemHtml} onChange={e => setItemHtml(e.target.checked)} style={{ accentColor:cfg.color }}/>
+                    <span style={{ fontSize:12, color:"var(--text2)" }}>HTML body</span>
+                    {itemHtml && <span style={{ ...S.chip, background:cfg.colorDim, color:cfg.color }}>HTML</span>}
+                  </label>
+                </>
+              ) : (
+                <Field label="Subject Line">
+                  <input value={itemText} onChange={e => setItemText(e.target.value)} placeholder="Enter a subject line..."
+                    style={{ ...S.input, fontFamily:"var(--font-display)" }} onFocus={onFocus} onBlur={onBlur}/>
+                </Field>
+              )}
 
-              <Field label="Email Body">
-                <textarea value={varBody} onChange={e => setVarBody(e.target.value)}
-                  placeholder={varHtml ? "<p>Hello,</p>\n<p>Your message here...</p>" : "Hello,\n\nYour message here...\n\nBest regards"}
-                  style={{ ...S.textarea, minHeight:180 }} onFocus={onFocus} onBlur={onBlur}/>
-              </Field>
-
-              <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", marginBottom:14 }}>
-                <input type="checkbox" checked={varHtml} onChange={e => setVarHtml(e.target.checked)} style={{ accentColor:"#8b5cf6" }}/>
-                <span style={{ fontSize:12, color:"var(--text2)" }}>HTML body</span>
-                {varHtml && <span style={{ ...S.chip, background:"rgba(139,92,246,0.15)", color:"#8b5cf6" }}>HTML</span>}
-              </label>
-
-              <button onClick={handleSaveVariation} disabled={saving || (!editingId && variations.length >= 20)}
-                style={{ ...S.btnPrimary, width:"100%", background:"#8b5cf6", boxShadow:"0 0 18px rgba(139,92,246,0.2)", opacity:(saving || (!editingId && variations.length >= 20)) ? 0.5 : 1 }}>
+              <button onClick={handleSaveItem} disabled={saving || (!editingId && items.length >= 20)}
+                style={{ ...S.btnPrimary, width:"100%", background:cfg.color, boxShadow:`0 0 18px ${cfg.colorDim}`, opacity:(saving || (!editingId && items.length >= 20)) ? 0.5 : 1 }}>
                 {saving ? <><Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> Saving...</>
-                  : editingId ? <><CheckCircle size={14}/> Update Variation</> : <><Plus size={14}/> Add Variation</>}
+                  : editingId ? <><CheckCircle size={14}/> Update</> : <><Plus size={14}/> Add {cfg.noun}</>}
               </button>
 
-              {!editingId && variations.length >= 20 && (
-                <div style={{ marginTop:8, fontSize:11, color:"var(--amber)", textAlign:"center" }}>Maximum 20 variations reached.</div>
+              {!editingId && items.length >= 20 && (
+                <div style={{ marginTop:8, fontSize:11, color:"var(--amber)", textAlign:"center" }}>Maximum 20 {cfg.nounPlural} reached.</div>
               )}
             </div>
 
-            {/* Variations list */}
+            {/* Items list */}
             <div style={{ ...S.card, padding:0, overflow:"hidden" }}>
               <div style={{ padding:"16px 20px", borderBottom:"1px solid var(--border)", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
-                <span style={{ fontWeight:700, fontSize:15 }}>Variations</span>
-                <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                  <span style={{ ...S.chip, background:"var(--surface2)", color:"var(--text2)" }}>{variations.length}/20</span>
-                </div>
+                <span style={{ fontWeight:700, fontSize:15, textTransform:"capitalize" }}>{cfg.nounPlural}</span>
+                <span style={{ ...S.chip, background:"var(--surface2)", color:"var(--text2)" }}>{items.length}/20</span>
               </div>
 
-              {variations.length === 0 && (
+              {items.length === 0 && (
                 <div style={{ padding:"40px 20px", textAlign:"center", color:"var(--text3)", fontSize:13 }}>
-                  No variations yet. Add your first subject + body on the left.
+                  No {cfg.nounPlural} yet. Add your first one on the left.
                 </div>
               )}
 
               <div style={{ maxHeight:520, overflowY:"auto" }}>
-                {variations.map((v, i) => (
-                  <div key={v.id} style={{ padding:"14px 20px", borderBottom:"1px solid var(--border)", background: editingId===v.id ? "rgba(139,92,246,0.05)" : "transparent", transition:"background 0.15s" }}>
+                {items.map((it, i) => (
+                  <div key={it.id} style={{ padding:"14px 20px", borderBottom:"1px solid var(--border)", background: editingId===it.id ? cfg.colorFaint : "transparent", transition:"background 0.15s" }}>
                     <div style={{ display:"flex", alignItems:"flex-start", gap:10 }}>
-                      <div style={{ width:24, height:24, borderRadius:6, background:"rgba(139,92,246,0.15)", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontSize:11, fontWeight:700, color:"#8b5cf6", fontFamily:"var(--font-mono)" }}>
+                      <div style={{ width:24, height:24, borderRadius:6, background:cfg.colorDim, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontSize:11, fontWeight:700, color:cfg.color, fontFamily:"var(--font-mono)" }}>
                         {i+1}
                       </div>
                       <div style={{ flex:1, minWidth:0 }}>
-                        <div style={{ fontSize:13, fontWeight:600, color:"var(--text)", marginBottom:4, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                          {v.subject}
-                        </div>
-                        <div style={{ fontSize:11, color:"var(--text3)", lineHeight:1.5, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>
-                          {v.is_html ? v.body.replace(/<[^>]+>/g, " ").trim() : v.body}
-                        </div>
-                        {v.is_html && <span style={{ ...S.chip, background:"rgba(139,92,246,0.1)", color:"#8b5cf6", marginTop:4, fontSize:10 }}>HTML</span>}
+                        {cfg.multiline ? (
+                          <>
+                            <div style={{ fontSize:12, color:"var(--text2)", lineHeight:1.5, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:3, WebkitBoxOrient:"vertical" }}>
+                              {it.is_html ? it.body.replace(/<[^>]+>/g, " ").trim() : it.body}
+                            </div>
+                            {it.is_html && <span style={{ ...S.chip, background:cfg.colorFaint, color:cfg.color, marginTop:4, fontSize:10 }}>HTML</span>}
+                          </>
+                        ) : (
+                          <div style={{ fontSize:13, fontWeight:600, color:"var(--text)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                            {it.subject}
+                          </div>
+                        )}
                       </div>
                       <div style={{ display:"flex", gap:4, flexShrink:0 }}>
-                        <button onClick={() => handleEdit(v)}
+                        <button onClick={() => handleEdit(it)}
                           style={{ background:"none", border:"none", cursor:"pointer", color:"var(--text3)", padding:4 }}
-                          onMouseEnter={e => e.currentTarget.style.color="#8b5cf6"}
+                          onMouseEnter={e => e.currentTarget.style.color=cfg.color}
                           onMouseLeave={e => e.currentTarget.style.color="var(--text3)"}>
                           <Edit2 size={13}/>
                         </button>
-                        <button onClick={() => handleDeleteVariation(v.id)}
+                        <button onClick={() => handleDeleteItem(it.id)}
                           style={{ background:"none", border:"none", cursor:"pointer", color:"var(--text3)", padding:4 }}
                           onMouseEnter={e => e.currentTarget.style.color="var(--red)"}
                           onMouseLeave={e => e.currentTarget.style.color="var(--text3)"}>
@@ -1362,10 +1399,10 @@ function ContentGroupsPage({ authHeader }) {
                 ))}
               </div>
 
-              {variations.length > 0 && (
-                <div style={{ padding:"12px 20px", background:"rgba(139,92,246,0.05)", borderTop:"1px solid var(--border)" }}>
-                  <div style={{ fontSize:11, color:"#8b5cf6", fontFamily:"var(--font-mono)" }}>
-                    ✓ Each recipient gets a randomly picked variation
+              {items.length > 0 && (
+                <div style={{ padding:"12px 20px", background:cfg.colorFaint, borderTop:"1px solid var(--border)" }}>
+                  <div style={{ fontSize:11, color:cfg.color, fontFamily:"var(--font-mono)" }}>
+                    ✓ Each recipient gets a randomly picked {cfg.noun}
                   </div>
                 </div>
               )}
@@ -1376,6 +1413,28 @@ function ContentGroupsPage({ authHeader }) {
     </div>
   );
 }
+
+const SUBJECT_CFG = {
+  apiBase:"/api/subject-groups", title:"Subject Groups", noun:"subject", nounPlural:"subjects",
+  field:"subject", multiline:false, hasHtml:false,
+  color:"#8b5cf6", colorDim:"rgba(139,92,246,0.15)", colorFaint:"rgba(139,92,246,0.06)",
+  namePlaceholder:"e.g. Summer Subject Lines",
+  subtitle:"Add up to 20 subject lines per group. Each recipient gets a randomly picked subject.",
+  icon:(size, opacity) => <Type size={size} color="#8b5cf6" style={opacity ? { opacity, display:"block", margin:"0 auto" } : undefined}/>,
+};
+
+const BODY_CFG = {
+  apiBase:"/api/body-groups", title:"Body Groups", noun:"body", nounPlural:"bodies",
+  field:"body", multiline:true, hasHtml:true,
+  color:"#0ea5e9", colorDim:"rgba(14,165,233,0.15)", colorFaint:"rgba(14,165,233,0.06)",
+  namePlaceholder:"e.g. Summer Email Bodies",
+  subtitle:"Add up to 20 message bodies per group. Each recipient gets a randomly picked body.",
+  icon:(size, opacity) => <FileText size={size} color="#0ea5e9" style={opacity ? { opacity, display:"block", margin:"0 auto" } : undefined}/>,
+};
+
+function SubjectGroupsPage({ authHeader }) { return <ItemGroupsPage authHeader={authHeader} cfg={SUBJECT_CFG}/>; }
+function BodyGroupsPage({ authHeader })    { return <ItemGroupsPage authHeader={authHeader} cfg={BODY_CFG}/>; }
+
 
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 function MainApp({ user, token, onLogout }) {
@@ -1391,7 +1450,8 @@ function MainApp({ user, token, onLogout }) {
 
   const NAV = [
     { key:"compose",          label:"Compose",           icon:<Mail size={13}/> },
-    { key:"content-groups",   label:"Content Groups",    icon:<FileText size={13}/> },
+    { key:"subject-groups",   label:"Subject Groups",    icon:<Type size={13}/> },
+    { key:"body-groups",      label:"Body Groups",       icon:<FileText size={13}/> },
     { key:"sender-groups",    label:"Sender Groups",     icon:<AtSign size={13}/> },
     { key:"recipient-groups", label:"Recipient Groups",  icon:<Users size={13}/> },
   ];
@@ -1428,7 +1488,8 @@ function MainApp({ user, token, onLogout }) {
       </header>
 
       {page === "compose"          && <ComposePage authHeader={authHeader} prefilledTo={prefilledTo} setPrefilledTo={setPrefilledTo}/>}
-      {page === "content-groups"   && <ContentGroupsPage authHeader={authHeader} onUseGroup={(g) => { setPage("compose"); }}/>}
+      {page === "subject-groups"   && <SubjectGroupsPage authHeader={authHeader}/>}
+      {page === "body-groups"      && <BodyGroupsPage authHeader={authHeader}/>}
       {page === "sender-groups"    && <SenderGroupsPage authHeader={authHeader}/>}
       {page === "recipient-groups" && <RecipientGroupsPage authHeader={authHeader} onUseGroup={handleUseGroup}/>}
 

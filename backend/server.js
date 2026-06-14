@@ -353,22 +353,34 @@ app.post("/api/sender-groups/:id/accounts/:accountId/test", authMiddleware, asyn
 
 // ─── Send Email ───────────────────────────────────────────────────────────────
 app.post("/api/send", authMiddleware, upload.array("attachments", 10), async (req, res) => {
-  const { smtpHost, smtpPort, smtpUser, smtpPass, fromName, to, subject, body, isHtml, minDelay, maxDelay, senderGroupId, contentGroupId } = req.body;
+  const { smtpHost, smtpPort, smtpUser, smtpPass, fromName, to, subject, body, isHtml, minDelay, maxDelay, senderGroupId, subjectGroupId, bodyGroupId } = req.body;
 
   if (!to) return res.json({ ok: false, message: "Recipient (To) is required." });
 
-  // Load content variations if using a content group
-  let contentVariations = null;
-  if (contentGroupId) {
-    const cv = await pool.query(
-      "SELECT cv.* FROM content_variations cv JOIN content_groups cg ON cg.id = cv.group_id WHERE cv.group_id=$1 AND cg.user_id=$2",
-      [contentGroupId, req.user.id]
+  // Load subject pool if using a subject group, otherwise require a single subject
+  let subjectItems = null;
+  if (subjectGroupId) {
+    const si = await pool.query(
+      "SELECT si.* FROM subject_items si JOIN subject_groups sg ON sg.id = si.group_id WHERE si.group_id=$1 AND sg.user_id=$2",
+      [subjectGroupId, req.user.id]
     );
-    if (cv.rows.length === 0) return res.json({ ok: false, message: "Content group has no variations. Add subject/body variations first." });
-    contentVariations = cv.rows;
-  } else {
-    if (!subject) return res.json({ ok: false, message: "Subject is required." });
-    if (!body)    return res.json({ ok: false, message: "Message body is required." });
+    if (si.rows.length === 0) return res.json({ ok: false, message: "Subject group has no subjects. Add subjects first." });
+    subjectItems = si.rows;
+  } else if (!subject) {
+    return res.json({ ok: false, message: "Subject is required." });
+  }
+
+  // Load body pool if using a body group, otherwise require a single body
+  let bodyItems = null;
+  if (bodyGroupId) {
+    const bi = await pool.query(
+      "SELECT bi.* FROM body_items bi JOIN body_groups bg ON bg.id = bi.group_id WHERE bi.group_id=$1 AND bg.user_id=$2",
+      [bodyGroupId, req.user.id]
+    );
+    if (bi.rows.length === 0) return res.json({ ok: false, message: "Body group has no bodies. Add bodies first." });
+    bodyItems = bi.rows;
+  } else if (!body) {
+    return res.json({ ok: false, message: "Message body is required." });
   }
 
   const recipients = parseRecipients(to);
@@ -409,17 +421,20 @@ app.post("/api/send", authMiddleware, upload.array("attachments", 10), async (re
       sender = { host: smtpHost, port: smtpPort, username: smtpUser, password: smtpPass, from_name: fromName };
     }
 
-    // Pick random content variation OR use single subject/body
+    // Pick subject and body independently — random from each group, or the single value
     let emailSubject, emailBody, emailIsHtml;
-    if (contentVariations) {
-      const variation = pickRandom(contentVariations);
-      emailSubject = variation.subject;
-      emailBody    = variation.body;
-      emailIsHtml  = variation.is_html;
+    if (subjectItems) {
+      emailSubject = pickRandom(subjectItems).subject;
     } else {
       emailSubject = subject.trim();
-      emailBody    = body;
-      emailIsHtml  = useHtml;
+    }
+    if (bodyItems) {
+      const pickedBody = pickRandom(bodyItems);
+      emailBody   = pickedBody.body;
+      emailIsHtml = pickedBody.is_html;
+    } else {
+      emailBody   = body;
+      emailIsHtml = useHtml;
     }
 
     const fromAddr = sender.username.trim();
@@ -452,30 +467,30 @@ app.post("/api/send", authMiddleware, upload.array("attachments", 10), async (re
   });
 });
 
-// ─── CONTENT GROUPS: Create ───────────────────────────────────────────────────
-app.post("/api/content-groups", authMiddleware, async (req, res) => {
+// ─── SUBJECT GROUPS: Create ───────────────────────────────────────────────────
+app.post("/api/subject-groups", authMiddleware, async (req, res) => {
   const { name, description } = req.body;
   if (!name) return res.json({ ok: false, message: "Group name is required." });
   try {
     const result = await pool.query(
-      "INSERT INTO content_groups (user_id, name, description) VALUES ($1, $2, $3) RETURNING *",
+      "INSERT INTO subject_groups (user_id, name, description) VALUES ($1, $2, $3) RETURNING *",
       [req.user.id, name.trim(), description || ""]
     );
-    res.json({ ok: true, group: result.rows[0], message: "Content group created." });
+    res.json({ ok: true, group: result.rows[0], message: "Subject group created." });
   } catch (err) {
     res.json({ ok: false, message: err.message });
   }
 });
 
-// ─── CONTENT GROUPS: List ─────────────────────────────────────────────────────
-app.get("/api/content-groups", authMiddleware, async (req, res) => {
+// ─── SUBJECT GROUPS: List ─────────────────────────────────────────────────────
+app.get("/api/subject-groups", authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT cg.*, COUNT(cv.id)::int AS variation_count
-      FROM content_groups cg
-      LEFT JOIN content_variations cv ON cv.group_id = cg.id
-      WHERE cg.user_id = $1
-      GROUP BY cg.id ORDER BY cg.created_at DESC
+      SELECT sg.*, COUNT(si.id)::int AS item_count
+      FROM subject_groups sg
+      LEFT JOIN subject_items si ON si.group_id = sg.id
+      WHERE sg.user_id = $1
+      GROUP BY sg.id ORDER BY sg.created_at DESC
     `, [req.user.id]);
     res.json({ ok: true, groups: result.rows });
   } catch (err) {
@@ -483,68 +498,166 @@ app.get("/api/content-groups", authMiddleware, async (req, res) => {
   }
 });
 
-// ─── CONTENT GROUPS: Get one with variations ──────────────────────────────────
-app.get("/api/content-groups/:id", authMiddleware, async (req, res) => {
+// ─── SUBJECT GROUPS: Get one with items ───────────────────────────────────────
+app.get("/api/subject-groups/:id", authMiddleware, async (req, res) => {
   try {
-    const g = await pool.query("SELECT * FROM content_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
-    if (g.rows.length === 0) return res.json({ ok: false, message: "Content group not found." });
-    const v = await pool.query("SELECT * FROM content_variations WHERE group_id=$1 ORDER BY sort_order ASC, created_at ASC", [req.params.id]);
-    res.json({ ok: true, group: g.rows[0], variations: v.rows });
+    const g = await pool.query("SELECT * FROM subject_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    if (g.rows.length === 0) return res.json({ ok: false, message: "Subject group not found." });
+    const items = await pool.query("SELECT * FROM subject_items WHERE group_id=$1 ORDER BY sort_order ASC, created_at ASC", [req.params.id]);
+    res.json({ ok: true, group: g.rows[0], items: items.rows });
   } catch (err) {
     res.json({ ok: false, message: err.message });
   }
 });
 
-// ─── CONTENT GROUPS: Delete ───────────────────────────────────────────────────
-app.delete("/api/content-groups/:id", authMiddleware, async (req, res) => {
+// ─── SUBJECT GROUPS: Delete ───────────────────────────────────────────────────
+app.delete("/api/subject-groups/:id", authMiddleware, async (req, res) => {
   try {
-    await pool.query("DELETE FROM content_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
-    res.json({ ok: true, message: "Content group deleted." });
+    await pool.query("DELETE FROM subject_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    res.json({ ok: true, message: "Subject group deleted." });
   } catch (err) {
     res.json({ ok: false, message: err.message });
   }
 });
 
-// ─── CONTENT VARIATIONS: Add ──────────────────────────────────────────────────
-app.post("/api/content-groups/:id/variations", authMiddleware, async (req, res) => {
-  const { subject, body, isHtml } = req.body;
-  if (!subject || !body) return res.json({ ok: false, message: "Subject and body are required." });
-  const g = await pool.query("SELECT id FROM content_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
-  if (g.rows.length === 0) return res.json({ ok: false, message: "Content group not found." });
+// ─── SUBJECT ITEMS: Add ───────────────────────────────────────────────────────
+app.post("/api/subject-groups/:id/items", authMiddleware, async (req, res) => {
+  const { subject } = req.body;
+  if (!subject || !subject.trim()) return res.json({ ok: false, message: "Subject is required." });
+  const g = await pool.query("SELECT id FROM subject_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+  if (g.rows.length === 0) return res.json({ ok: false, message: "Subject group not found." });
   try {
-    const count  = await pool.query("SELECT COUNT(*) FROM content_variations WHERE group_id=$1", [req.params.id]);
+    const count = await pool.query("SELECT COUNT(*) FROM subject_items WHERE group_id=$1", [req.params.id]);
     if (parseInt(count.rows[0].count) >= 20)
-      return res.json({ ok: false, message: "Maximum 20 variations per group." });
+      return res.json({ ok: false, message: "Maximum 20 subjects per group." });
     const result = await pool.query(
-      "INSERT INTO content_variations (group_id, subject, body, is_html, sort_order) VALUES ($1,$2,$3,$4,$5) RETURNING *",
-      [req.params.id, subject.trim(), body, isHtml === true || isHtml === "true", parseInt(count.rows[0].count)]
+      "INSERT INTO subject_items (group_id, subject, sort_order) VALUES ($1,$2,$3) RETURNING *",
+      [req.params.id, subject.trim(), parseInt(count.rows[0].count)]
     );
-    res.json({ ok: true, variation: result.rows[0], message: "Variation added." });
+    res.json({ ok: true, item: result.rows[0], message: "Subject added." });
   } catch (err) {
     res.json({ ok: false, message: err.message });
   }
 });
 
-// ─── CONTENT VARIATIONS: Update ───────────────────────────────────────────────
-app.put("/api/content-groups/:id/variations/:varId", authMiddleware, async (req, res) => {
-  const { subject, body, isHtml } = req.body;
-  if (!subject || !body) return res.json({ ok: false, message: "Subject and body are required." });
+// ─── SUBJECT ITEMS: Update ────────────────────────────────────────────────────
+app.put("/api/subject-groups/:id/items/:itemId", authMiddleware, async (req, res) => {
+  const { subject } = req.body;
+  if (!subject || !subject.trim()) return res.json({ ok: false, message: "Subject is required." });
   try {
     await pool.query(
-      "UPDATE content_variations SET subject=$1, body=$2, is_html=$3 WHERE id=$4 AND group_id=$5",
-      [subject.trim(), body, isHtml === true || isHtml === "true", req.params.varId, req.params.id]
+      "UPDATE subject_items SET subject=$1 WHERE id=$2 AND group_id=$3",
+      [subject.trim(), req.params.itemId, req.params.id]
     );
-    res.json({ ok: true, message: "Variation updated." });
+    res.json({ ok: true, message: "Subject updated." });
   } catch (err) {
     res.json({ ok: false, message: err.message });
   }
 });
 
-// ─── CONTENT VARIATIONS: Delete ───────────────────────────────────────────────
-app.delete("/api/content-groups/:id/variations/:varId", authMiddleware, async (req, res) => {
+// ─── SUBJECT ITEMS: Delete ────────────────────────────────────────────────────
+app.delete("/api/subject-groups/:id/items/:itemId", authMiddleware, async (req, res) => {
   try {
-    await pool.query("DELETE FROM content_variations WHERE id=$1 AND group_id=$2", [req.params.varId, req.params.id]);
-    res.json({ ok: true, message: "Variation deleted." });
+    await pool.query("DELETE FROM subject_items WHERE id=$1 AND group_id=$2", [req.params.itemId, req.params.id]);
+    res.json({ ok: true, message: "Subject deleted." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── BODY GROUPS: Create ──────────────────────────────────────────────────────
+app.post("/api/body-groups", authMiddleware, async (req, res) => {
+  const { name, description } = req.body;
+  if (!name) return res.json({ ok: false, message: "Group name is required." });
+  try {
+    const result = await pool.query(
+      "INSERT INTO body_groups (user_id, name, description) VALUES ($1, $2, $3) RETURNING *",
+      [req.user.id, name.trim(), description || ""]
+    );
+    res.json({ ok: true, group: result.rows[0], message: "Body group created." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── BODY GROUPS: List ────────────────────────────────────────────────────────
+app.get("/api/body-groups", authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT bg.*, COUNT(bi.id)::int AS item_count
+      FROM body_groups bg
+      LEFT JOIN body_items bi ON bi.group_id = bg.id
+      WHERE bg.user_id = $1
+      GROUP BY bg.id ORDER BY bg.created_at DESC
+    `, [req.user.id]);
+    res.json({ ok: true, groups: result.rows });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── BODY GROUPS: Get one with items ──────────────────────────────────────────
+app.get("/api/body-groups/:id", authMiddleware, async (req, res) => {
+  try {
+    const g = await pool.query("SELECT * FROM body_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    if (g.rows.length === 0) return res.json({ ok: false, message: "Body group not found." });
+    const items = await pool.query("SELECT * FROM body_items WHERE group_id=$1 ORDER BY sort_order ASC, created_at ASC", [req.params.id]);
+    res.json({ ok: true, group: g.rows[0], items: items.rows });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── BODY GROUPS: Delete ──────────────────────────────────────────────────────
+app.delete("/api/body-groups/:id", authMiddleware, async (req, res) => {
+  try {
+    await pool.query("DELETE FROM body_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    res.json({ ok: true, message: "Body group deleted." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── BODY ITEMS: Add ──────────────────────────────────────────────────────────
+app.post("/api/body-groups/:id/items", authMiddleware, async (req, res) => {
+  const { body, isHtml } = req.body;
+  if (!body || !body.trim()) return res.json({ ok: false, message: "Body is required." });
+  const g = await pool.query("SELECT id FROM body_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+  if (g.rows.length === 0) return res.json({ ok: false, message: "Body group not found." });
+  try {
+    const count = await pool.query("SELECT COUNT(*) FROM body_items WHERE group_id=$1", [req.params.id]);
+    if (parseInt(count.rows[0].count) >= 20)
+      return res.json({ ok: false, message: "Maximum 20 bodies per group." });
+    const result = await pool.query(
+      "INSERT INTO body_items (group_id, body, is_html, sort_order) VALUES ($1,$2,$3,$4) RETURNING *",
+      [req.params.id, body, isHtml === true || isHtml === "true", parseInt(count.rows[0].count)]
+    );
+    res.json({ ok: true, item: result.rows[0], message: "Body added." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── BODY ITEMS: Update ───────────────────────────────────────────────────────
+app.put("/api/body-groups/:id/items/:itemId", authMiddleware, async (req, res) => {
+  const { body, isHtml } = req.body;
+  if (!body || !body.trim()) return res.json({ ok: false, message: "Body is required." });
+  try {
+    await pool.query(
+      "UPDATE body_items SET body=$1, is_html=$2 WHERE id=$3 AND group_id=$4",
+      [body, isHtml === true || isHtml === "true", req.params.itemId, req.params.id]
+    );
+    res.json({ ok: true, message: "Body updated." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── BODY ITEMS: Delete ───────────────────────────────────────────────────────
+app.delete("/api/body-groups/:id/items/:itemId", authMiddleware, async (req, res) => {
+  try {
+    await pool.query("DELETE FROM body_items WHERE id=$1 AND group_id=$2", [req.params.itemId, req.params.id]);
+    res.json({ ok: true, message: "Body deleted." });
   } catch (err) {
     res.json({ ok: false, message: err.message });
   }

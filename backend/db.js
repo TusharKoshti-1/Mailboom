@@ -62,7 +62,8 @@ async function initDB() {
       added_at    TIMESTAMP DEFAULT NOW()
     );
 
-    CREATE TABLE IF NOT EXISTS content_groups (
+    -- Subject Groups: a pool of subject lines, picked at random per recipient
+    CREATE TABLE IF NOT EXISTS subject_groups (
       id          SERIAL PRIMARY KEY,
       user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
       name        VARCHAR(100) NOT NULL,
@@ -70,15 +71,36 @@ async function initDB() {
       created_at  TIMESTAMP DEFAULT NOW()
     );
 
-    CREATE TABLE IF NOT EXISTS content_variations (
+    CREATE TABLE IF NOT EXISTS subject_items (
       id          SERIAL PRIMARY KEY,
-      group_id    INTEGER REFERENCES content_groups(id) ON DELETE CASCADE,
+      group_id    INTEGER REFERENCES subject_groups(id) ON DELETE CASCADE,
       subject     TEXT NOT NULL,
+      sort_order  INTEGER DEFAULT 0,
+      created_at  TIMESTAMP DEFAULT NOW()
+    );
+
+    -- Body Groups: a pool of message bodies, picked at random per recipient
+    CREATE TABLE IF NOT EXISTS body_groups (
+      id          SERIAL PRIMARY KEY,
+      user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      name        VARCHAR(100) NOT NULL,
+      description VARCHAR(255),
+      created_at  TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS body_items (
+      id          SERIAL PRIMARY KEY,
+      group_id    INTEGER REFERENCES body_groups(id) ON DELETE CASCADE,
       body        TEXT NOT NULL,
       is_html     BOOLEAN DEFAULT FALSE,
       sort_order  INTEGER DEFAULT 0,
       created_at  TIMESTAMP DEFAULT NOW()
     );
+
+    -- Old combined content groups (subject+body paired) are replaced by the
+    -- independent subject/body groups above.
+    DROP TABLE IF EXISTS content_variations;
+    DROP TABLE IF EXISTS content_groups;
   `);
   console.log("✅ Database tables ready");
 }
