@@ -101,6 +101,33 @@ async function initDB() {
     -- independent subject/body groups above.
     DROP TABLE IF EXISTS content_variations;
     DROP TABLE IF EXISTS content_groups;
+
+    -- One row per successfully sent email, with a unique tracking id used by
+    -- the tracking pixel. open_count / first_/last_opened_at are denormalized
+    -- for fast listing; every individual open is also logged in email_opens.
+    CREATE TABLE IF NOT EXISTS sent_emails (
+      id              SERIAL PRIMARY KEY,
+      user_id         INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      tracking_id     VARCHAR(64) UNIQUE NOT NULL,
+      recipient       VARCHAR(255) NOT NULL,
+      subject         TEXT,
+      from_addr       VARCHAR(255),
+      open_count      INTEGER DEFAULT 0,
+      first_opened_at TIMESTAMP,
+      last_opened_at  TIMESTAMP,
+      sent_at         TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS email_opens (
+      id            SERIAL PRIMARY KEY,
+      sent_email_id INTEGER REFERENCES sent_emails(id) ON DELETE CASCADE,
+      opened_at     TIMESTAMP DEFAULT NOW(),
+      user_agent    TEXT,
+      ip            VARCHAR(64)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sent_emails_user ON sent_emails(user_id);
+    CREATE INDEX IF NOT EXISTS idx_email_opens_sent ON email_opens(sent_email_id);
   `);
   console.log("✅ Database tables ready");
 }

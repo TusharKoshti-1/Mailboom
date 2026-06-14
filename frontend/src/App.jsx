@@ -1,9 +1,11 @@
 import { useState, useRef, useEffect } from "react";
+import { Routes, Route, Navigate, NavLink, useNavigate, useLocation, useParams } from "react-router-dom";
 import {
   Zap, Settings2, Mail, Paperclip, Send, Wifi, Eye, EyeOff,
   X, Upload, Loader2, AlertCircle, Terminal, RefreshCw,
   Clock, Users, LogOut, User, Save, Plus, Trash2, ChevronRight,
   ArrowLeft, FolderOpen, UserPlus, AtSign, CheckCircle, FileText, Edit2, Type,
+  Activity, BarChart3, MailOpen,
 } from "lucide-react";
 
 const onFocus = e => e.target.style.borderColor = "var(--accent)";
@@ -462,7 +464,8 @@ function SenderGroupsPage({ authHeader }) {
 }
 
 // ─── RECIPIENT GROUPS PAGE ────────────────────────────────────────────────────
-function RecipientGroupsPage({ authHeader, onUseGroup }) {
+function RecipientGroupsPage({ authHeader }) {
+  const navigate = useNavigate();
   const [groups,      setGroups]      = useState([]);
   const [view,        setView]        = useState("list");
   const [activeGroup, setActiveGroup] = useState(null);
@@ -475,6 +478,21 @@ function RecipientGroupsPage({ authHeader, onUseGroup }) {
   const [adding,      setAdding]      = useState(false);
 
   const showMsg = (type, text) => { setMsg({ type, text }); setTimeout(() => setMsg(null), 3000); };
+
+  // Send a group's members to the Compose page via router state. When invoked
+  // from the list (no members loaded yet) we fetch them first.
+  const useInCompose = async (g, preloaded) => {
+    let mem = preloaded;
+    if (!mem) {
+      try {
+        const res  = await fetch(`/api/groups/${g.id}`, { headers: authHeader });
+        const data = await res.json();
+        mem = data.ok ? data.members : [];
+      } catch { mem = []; }
+    }
+    if (!mem || mem.length === 0) return showMsg("error", "This group has no members.");
+    navigate("/compose", { state: { prefilledTo: mem.map(m => m.email).join("\n") } });
+  };
 
   const loadGroups = async () => {
     setLoading(true);
@@ -574,7 +592,7 @@ function RecipientGroupsPage({ authHeader, onUseGroup }) {
                   </div>
                 </div>
                 <div style={{ display:"flex", gap:8 }}>
-                  <button onClick={() => { onUseGroup(g); }}
+                  <button onClick={() => useInCompose(g)}
                     style={{ ...S.btnSecondary, fontSize:12, padding:"7px 14px", borderColor:"var(--accent)", color:"var(--accent)" }}>
                     <Send size={12}/> Use in Compose
                   </button>
@@ -621,7 +639,7 @@ function RecipientGroupsPage({ authHeader, onUseGroup }) {
               {activeGroup.description && <div style={{ color:"var(--text3)", fontSize:13 }}>{activeGroup.description}</div>}
             </div>
             <span style={{ ...S.chip, background:"var(--accent-dim)", color:"var(--accent)", fontSize:13, padding:"4px 12px" }}>{members.length} members</span>
-            <button onClick={() => onUseGroup(activeGroup, members)} style={{ ...S.btnPrimary, padding:"9px 18px", fontSize:13 }}>
+            <button onClick={() => useInCompose(activeGroup, members)} style={{ ...S.btnPrimary, padding:"9px 18px", fontSize:13 }}>
               <Send size={13}/> Use in Compose
             </button>
           </div>
@@ -668,7 +686,8 @@ function RecipientGroupsPage({ authHeader, onUseGroup }) {
 }
 
 // ─── COMPOSE PAGE ─────────────────────────────────────────────────────────────
-function ComposePage({ authHeader, prefilledTo, setPrefilledTo }) {
+function ComposePage({ authHeader }) {
+  const location = useLocation();
   const [preset,   setPreset]   = useState("hostinger");
   const [smtpHost, setSmtpHost] = useState(PRESETS.hostinger.host);
   const [smtpPort, setSmtpPort] = useState(PRESETS.hostinger.port);
@@ -746,7 +765,7 @@ function ComposePage({ authHeader, prefilledTo, setPrefilledTo }) {
       .catch(() => {});
   }, []);
 
-  useEffect(() => { if (prefilledTo) { setTo(prefilledTo); setPrefilledTo(null); } }, [prefilledTo]);
+  useEffect(() => { if (location.state?.prefilledTo) setTo(location.state.prefilledTo); }, [location.state]);
   useEffect(() => { logEndRef.current?.scrollIntoView({ behavior:"smooth" }); }, [logs]);
 
   const addLog = (level, msg) =>
@@ -1436,25 +1455,226 @@ function SubjectGroupsPage({ authHeader }) { return <ItemGroupsPage authHeader={
 function BodyGroupsPage({ authHeader })    { return <ItemGroupsPage authHeader={authHeader} cfg={BODY_CFG}/>; }
 
 
-// ─── MAIN APP ─────────────────────────────────────────────────────────────────
-function MainApp({ user, token, onLogout }) {
-  const [page,        setPage]        = useState("compose");
-  const [prefilledTo, setPrefilledTo] = useState(null);
-  const authHeader = { "Authorization": `Bearer ${token}` };
+// ─── TRACKING PAGE (list + summary) ───────────────────────────────────────────
+const fmtDate = (d) => d ? new Date(d).toLocaleString() : "—";
 
-  const handleUseGroup = (group, members) => {
-    if (!members || members.length === 0) { alert("This group has no members."); return; }
-    setPrefilledTo(members.map(m => m.email).join("\n"));
-    setPage("compose");
+function StatCard({ icon, label, value, color }) {
+  return (
+    <div style={{ ...S.card, padding:"18px 20px", display:"flex", alignItems:"center", gap:14 }}>
+      <div style={{ width:44, height:44, borderRadius:12, background:`${color}22`, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>{icon}</div>
+      <div>
+        <div style={{ fontWeight:800, fontSize:26, letterSpacing:"-0.5px", lineHeight:1, fontFamily:"var(--font-mono)" }}>{value}</div>
+        <div style={{ fontSize:12, color:"var(--text3)", marginTop:4 }}>{label}</div>
+      </div>
+    </div>
+  );
+}
+
+function TrackingPage({ authHeader }) {
+  const navigate = useNavigate();
+  const [emails,  setEmails]  = useState([]);
+  const [summary, setSummary] = useState({ total_sent:0, total_opened:0, total_opens:0 });
+  const [loading, setLoading] = useState(false);
+  const [msg,     setMsg]     = useState(null);
+
+  const showMsg = (type, text) => { setMsg({ type, text }); setTimeout(() => setMsg(null), 3000); };
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const res  = await fetch("/api/tracking", { headers: authHeader });
+      const data = await res.json();
+      if (data.ok) { setEmails(data.emails); setSummary(data.summary); }
+    } catch {}
+    setLoading(false);
   };
 
+  useEffect(() => { load(); }, []);
+
+  const handleDelete = async (e, id) => {
+    e.stopPropagation();
+    if (!confirm("Delete this tracking record? Its open history will be lost.")) return;
+    try {
+      await fetch(`/api/tracking/${id}`, { method:"DELETE", headers: authHeader });
+      showMsg("success", "Record deleted."); load();
+    } catch {}
+  };
+
+  const openRate = summary.total_sent > 0 ? Math.round((summary.total_opened / summary.total_sent) * 100) : 0;
+
+  return (
+    <div style={{ flex:1, padding:"28px 32px", overflowY:"auto" }}>
+      <Toast msg={msg}/>
+
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:24 }}>
+        <div>
+          <div style={{ fontWeight:800, fontSize:22, letterSpacing:"-0.5px" }}>Email Tracking</div>
+          <div style={{ color:"var(--text3)", fontSize:13, marginTop:3 }}>See whether and when each sent email was opened, and how many times.</div>
+        </div>
+        <button onClick={load} style={{ ...S.btnSecondary }}><RefreshCw size={13}/> Refresh</button>
+      </div>
+
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(4, 1fr)", gap:14, marginBottom:24 }}>
+        <StatCard icon={<Send size={20} color="var(--accent)"/>}     label="Emails Sent"        value={summary.total_sent}   color="#00e5ff"/>
+        <StatCard icon={<MailOpen size={20} color="var(--green)"/>}  label="Opened (unique)"    value={summary.total_opened} color="#00ff87"/>
+        <StatCard icon={<Eye size={20} color="#8b5cf6"/>}            label="Total Opens"        value={summary.total_opens}  color="#8b5cf6"/>
+        <StatCard icon={<BarChart3 size={20} color="var(--amber)"/>} label="Open Rate"          value={`${openRate}%`}        color="#ffb703"/>
+      </div>
+
+      {loading && <div style={{ color:"var(--text3)", fontSize:13 }}>Loading...</div>}
+      {!loading && emails.length === 0 && (
+        <div style={{ textAlign:"center", padding:"60px 0", color:"var(--text3)" }}>
+          <Activity size={40} style={{ opacity:0.3, display:"block", margin:"0 auto 12px" }}/>
+          <div style={{ fontSize:15, fontWeight:600, marginBottom:6 }}>No tracked emails yet</div>
+          <div style={{ fontSize:13 }}>Send an email from Compose — opens will appear here.</div>
+        </div>
+      )}
+
+      {emails.length > 0 && (
+        <div style={{ ...S.card, padding:0, overflow:"hidden" }}>
+          <div style={{ display:"grid", gridTemplateColumns:"2fr 2fr 90px 1.4fr 36px", gap:12, padding:"12px 20px", borderBottom:"1px solid var(--border)", fontSize:11, fontWeight:700, letterSpacing:"0.06em", textTransform:"uppercase", color:"var(--text3)" }}>
+            <div>Recipient</div><div>Subject</div><div style={{ textAlign:"center" }}>Opens</div><div>Last Seen</div><div/>
+          </div>
+          {emails.map(em => (
+            <div key={em.id} onClick={() => navigate(`/tracking/${em.id}`)}
+              style={{ display:"grid", gridTemplateColumns:"2fr 2fr 90px 1.4fr 36px", gap:12, padding:"13px 20px", borderBottom:"1px solid var(--border)", alignItems:"center", cursor:"pointer", transition:"background 0.15s" }}
+              onMouseEnter={e => e.currentTarget.style.background="var(--surface2)"}
+              onMouseLeave={e => e.currentTarget.style.background="transparent"}>
+              <div style={{ fontSize:13, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{em.recipient}</div>
+              <div style={{ fontSize:13, color:"var(--text2)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{em.subject || <span style={{ color:"var(--text3)" }}>—</span>}</div>
+              <div style={{ textAlign:"center" }}>
+                <span style={{ ...S.chip, justifyContent:"center", background: em.open_count>0 ? "var(--green-dim)" : "var(--surface2)", color: em.open_count>0 ? "var(--green)" : "var(--text3)" }}>
+                  {em.open_count>0 ? <><Eye size={11}/> {em.open_count}</> : "—"}
+                </span>
+              </div>
+              <div style={{ fontSize:12, color:"var(--text3)", fontFamily:"var(--font-mono)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{fmtDate(em.last_opened_at)}</div>
+              <button onClick={(e) => handleDelete(e, em.id)} style={{ background:"none", border:"none", cursor:"pointer", color:"var(--text3)", padding:4 }}
+                onMouseEnter={e => e.currentTarget.style.color="var(--red)"}
+                onMouseLeave={e => e.currentTarget.style.color="var(--text3)"}><Trash2 size={13}/></button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ marginTop:14, fontSize:11, color:"var(--text3)", lineHeight:1.6 }}>
+        ℹ️ Open tracking uses an invisible pixel. Some mail clients block or pre-load images, so counts are a strong signal but not 100% exact.
+      </div>
+    </div>
+  );
+}
+
+// ─── TRACKING DETAIL PAGE (one email — every open with its time) ───────────────
+function TrackingDetailPage({ authHeader }) {
+  const { id }   = useParams();
+  const navigate = useNavigate();
+  const [email,   setEmail]   = useState(null);
+  const [opens,   setOpens]   = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error,   setError]   = useState("");
+
+  const load = async () => {
+    setLoading(true); setError("");
+    try {
+      const res  = await fetch(`/api/tracking/${id}`, { headers: authHeader });
+      const data = await res.json();
+      if (data.ok) { setEmail(data.email); setOpens(data.opens); }
+      else setError(data.message || "Not found.");
+    } catch { setError("Failed to load."); }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); }, [id]);
+
+  return (
+    <div style={{ flex:1, padding:"28px 32px", overflowY:"auto" }}>
+      <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:24 }}>
+        <button onClick={() => navigate("/tracking")} style={{ ...S.btnSecondary, width:"fit-content" }}><ArrowLeft size={13}/> Back</button>
+        <div style={{ fontWeight:800, fontSize:22, letterSpacing:"-0.5px" }}>Open History</div>
+        <div style={{ flex:1 }}/>
+        <button onClick={load} style={{ ...S.btnSecondary }}><RefreshCw size={13}/> Refresh</button>
+      </div>
+
+      {loading && <div style={{ color:"var(--text3)", fontSize:13 }}>Loading...</div>}
+      {error && !loading && <div style={{ color:"var(--red)", fontSize:13 }}>{error}</div>}
+
+      {email && !loading && (
+        <>
+          <div style={{ ...S.card, marginBottom:20 }}>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"14px 24px" }}>
+              <Meta label="Recipient"  value={email.recipient}/>
+              <Meta label="From"       value={email.from_addr || "—"}/>
+              <Meta label="Subject"    value={email.subject || "—"}/>
+              <Meta label="Sent At"    value={fmtDate(email.sent_at)}/>
+              <Meta label="First Seen" value={fmtDate(email.first_opened_at)}/>
+              <Meta label="Last Seen"  value={fmtDate(email.last_opened_at)}/>
+            </div>
+          </div>
+
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(3, 1fr)", gap:14, marginBottom:24 }}>
+            <StatCard icon={<Eye size={20} color="#8b5cf6"/>}           label="Total Times Seen" value={email.open_count} color="#8b5cf6"/>
+            <StatCard icon={<MailOpen size={20} color="var(--green)"/>} label="Status"           value={email.open_count>0 ? "Opened" : "Unseen"} color="#00ff87"/>
+            <StatCard icon={<Clock size={20} color="var(--accent)"/>}   label="Logged Events"    value={opens.length} color="#00e5ff"/>
+          </div>
+
+          <div style={{ ...S.card, padding:0, overflow:"hidden" }}>
+            <div style={{ padding:"16px 20px", borderBottom:"1px solid var(--border)", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+              <span style={{ fontWeight:700, fontSize:15 }}>All Seen Times</span>
+              <span style={{ ...S.chip, background:"var(--surface2)", color:"var(--text2)" }}>{opens.length}</span>
+            </div>
+            {opens.length === 0 && (
+              <div style={{ padding:"40px 20px", textAlign:"center", color:"var(--text3)", fontSize:13 }}>
+                Not opened yet. When the recipient opens this email, each view will be timestamped here.
+              </div>
+            )}
+            <div style={{ maxHeight:460, overflowY:"auto" }}>
+              {opens.map((o, i) => (
+                <div key={o.id} style={{ display:"flex", alignItems:"center", gap:12, padding:"12px 20px", borderBottom:"1px solid var(--border)" }}>
+                  <div style={{ width:28, height:28, borderRadius:"50%", background:"rgba(139,92,246,0.15)", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontSize:11, fontWeight:700, color:"#8b5cf6", fontFamily:"var(--font-mono)" }}>
+                    {opens.length - i}
+                  </div>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ fontSize:13, fontFamily:"var(--font-mono)" }}>{fmtDate(o.opened_at)}</div>
+                    {o.user_agent && <div style={{ fontSize:11, color:"var(--text3)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{o.user_agent}</div>}
+                  </div>
+                  {o.ip && <span style={{ fontSize:11, color:"var(--text3)", fontFamily:"var(--font-mono)", flexShrink:0 }}>{o.ip}</span>}
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Meta({ label, value }) {
+  return (
+    <div>
+      <div style={S.label}>{label}</div>
+      <div style={{ fontSize:13, color:"var(--text)", wordBreak:"break-word" }}>{value}</div>
+    </div>
+  );
+}
+
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
+function MainApp({ user, token, onLogout }) {
+  const authHeader = { "Authorization": `Bearer ${token}` };
+
   const NAV = [
-    { key:"compose",          label:"Compose",           icon:<Mail size={13}/> },
-    { key:"subject-groups",   label:"Subject Groups",    icon:<Type size={13}/> },
-    { key:"body-groups",      label:"Body Groups",       icon:<FileText size={13}/> },
-    { key:"sender-groups",    label:"Sender Groups",     icon:<AtSign size={13}/> },
-    { key:"recipient-groups", label:"Recipient Groups",  icon:<Users size={13}/> },
+    { to:"/compose",          label:"Compose",           icon:<Mail size={13}/> },
+    { to:"/subject-groups",   label:"Subject Groups",    icon:<Type size={13}/> },
+    { to:"/body-groups",      label:"Body Groups",       icon:<FileText size={13}/> },
+    { to:"/sender-groups",    label:"Sender Groups",     icon:<AtSign size={13}/> },
+    { to:"/recipient-groups", label:"Recipient Groups",  icon:<Users size={13}/> },
+    { to:"/tracking",         label:"Tracking",          icon:<Activity size={13}/> },
   ];
+
+  const navStyle = ({ isActive }) => ({
+    display:"flex", alignItems:"center", gap:6, padding:"7px 14px", borderRadius:"var(--radius)", border:"none", cursor:"pointer",
+    textDecoration:"none", fontFamily:"var(--font-display)", fontWeight:600, fontSize:13, transition:"all 0.15s",
+    background: isActive ? "var(--accent-dim)" : "transparent",
+    color: isActive ? "var(--accent)" : "var(--text3)",
+  });
 
   return (
     <div style={{ display:"flex", flexDirection:"column", minHeight:"100vh", background:"var(--bg)", fontFamily:"var(--font-display)" }}>
@@ -1466,12 +1686,7 @@ function MainApp({ user, token, onLogout }) {
         </div>
         <div style={{ display:"flex", gap:4 }}>
           {NAV.map(n => (
-            <button key={n.key} onClick={() => setPage(n.key)}
-              style={{ display:"flex", alignItems:"center", gap:6, padding:"7px 14px", borderRadius:"var(--radius)", border:"none", cursor:"pointer", fontFamily:"var(--font-display)", fontWeight:600, fontSize:13, transition:"all 0.15s",
-                background: page===n.key ? "var(--accent-dim)" : "transparent",
-                color: page===n.key ? "var(--accent)" : "var(--text3)" }}>
-              {n.icon}{n.label}
-            </button>
+            <NavLink key={n.to} to={n.to} style={navStyle}>{n.icon}{n.label}</NavLink>
           ))}
         </div>
         <div style={{ display:"flex", alignItems:"center", gap:12 }}>
@@ -1487,11 +1702,17 @@ function MainApp({ user, token, onLogout }) {
         </div>
       </header>
 
-      {page === "compose"          && <ComposePage authHeader={authHeader} prefilledTo={prefilledTo} setPrefilledTo={setPrefilledTo}/>}
-      {page === "subject-groups"   && <SubjectGroupsPage authHeader={authHeader}/>}
-      {page === "body-groups"      && <BodyGroupsPage authHeader={authHeader}/>}
-      {page === "sender-groups"    && <SenderGroupsPage authHeader={authHeader}/>}
-      {page === "recipient-groups" && <RecipientGroupsPage authHeader={authHeader} onUseGroup={handleUseGroup}/>}
+      <Routes>
+        <Route path="/"                 element={<Navigate to="/compose" replace/>}/>
+        <Route path="/compose"          element={<ComposePage authHeader={authHeader}/>}/>
+        <Route path="/subject-groups"   element={<SubjectGroupsPage authHeader={authHeader}/>}/>
+        <Route path="/body-groups"      element={<BodyGroupsPage authHeader={authHeader}/>}/>
+        <Route path="/sender-groups"    element={<SenderGroupsPage authHeader={authHeader}/>}/>
+        <Route path="/recipient-groups" element={<RecipientGroupsPage authHeader={authHeader}/>}/>
+        <Route path="/tracking"         element={<TrackingPage authHeader={authHeader}/>}/>
+        <Route path="/tracking/:id"     element={<TrackingDetailPage authHeader={authHeader}/>}/>
+        <Route path="*"                 element={<Navigate to="/compose" replace/>}/>
+      </Routes>
 
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>

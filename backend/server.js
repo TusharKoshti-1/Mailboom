@@ -7,11 +7,27 @@ const fs         = require("fs");
 const nodemailer = require("nodemailer");
 const bcrypt     = require("bcryptjs");
 const jwt        = require("jsonwebtoken");
+const crypto     = require("crypto");
 const { pool, initDB } = require("./db");
 
 const app    = express();
 const PORT   = process.env.PORT || 3001;
 const SECRET = process.env.JWT_SECRET || "mailblast_secret_change_in_production";
+
+// Behind Render/any proxy so req.protocol + x-forwarded-* are trustworthy.
+app.set("trust proxy", true);
+
+// 1x1 transparent GIF returned by the open-tracking pixel.
+const TRACKING_PIXEL = Buffer.from(
+  "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", "base64"
+);
+
+// Absolute, publicly reachable base URL for embedding the tracking pixel.
+function publicBaseUrl(req) {
+  if (process.env.PUBLIC_URL) return process.env.PUBLIC_URL.replace(/\/+$/, "");
+  const proto = req.headers["x-forwarded-proto"] || req.protocol || "http";
+  return `${proto}://${req.get("host")}`;
+}
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
@@ -60,6 +76,32 @@ function pickRandom(arr) {
 // ─── Health ───────────────────────────────────────────────────────────────────
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", version: "4.0.0", timestamp: new Date().toISOString() });
+});
+
+// ─── TRACKING PIXEL (public, no auth) ─────────────────────────────────────────
+// Loaded by the recipient's mail client when the email is opened. Records the
+// open then always returns a 1x1 GIF, regardless of whether the id is known.
+app.get("/api/track/open/:trackingId", async (req, res) => {
+  try {
+    const r = await pool.query("SELECT id FROM sent_emails WHERE tracking_id=$1", [req.params.trackingId]);
+    if (r.rows.length > 0) {
+      const sentId = r.rows[0].id;
+      const ua = (req.headers["user-agent"] || "").slice(0, 500);
+      const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").toString().split(",")[0].trim();
+      await pool.query("INSERT INTO email_opens (sent_email_id, user_agent, ip) VALUES ($1,$2,$3)", [sentId, ua, ip]);
+      await pool.query(
+        "UPDATE sent_emails SET open_count = open_count + 1, last_opened_at = NOW(), first_opened_at = COALESCE(first_opened_at, NOW()) WHERE id=$1",
+        [sentId]
+      );
+    }
+  } catch (err) {
+    console.error("Tracking pixel error:", err.message);
+  }
+  res.set("Content-Type", "image/gif");
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate, private");
+  res.set("Pragma", "no-cache");
+  res.set("Expires", "0");
+  res.end(TRACKING_PIXEL);
 });
 
 // ─── AUTH: Register ───────────────────────────────────────────────────────────
@@ -408,6 +450,7 @@ app.post("/api/send", authMiddleware, upload.array("attachments", 10), async (re
     : [];
 
   const results = [];
+  const baseUrl = publicBaseUrl(req);
 
   for (let i = 0; i < recipients.length; i++) {
     if (i > 0) await randomDelay(minS, maxS);
@@ -440,10 +483,16 @@ app.post("/api/send", authMiddleware, upload.array("attachments", 10), async (re
     const fromAddr = sender.username.trim();
     const fromFull = sender.from_name ? `"${sender.from_name}" <${fromAddr}>` : fromAddr;
 
+    // Unique tracking id + invisible pixel appended to the HTML body so opens
+    // can be detected. Plain-text emails get an HTML part carrying the pixel.
+    const trackingId = crypto.randomUUID();
+    const pixel = `<img src="${baseUrl}/api/track/open/${trackingId}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden" />`;
+    const htmlBody = (emailIsHtml ? emailBody : emailBody.replace(/\n/g, "<br>")) + pixel;
+
     const mailOptions = {
       from: fromFull, to: recipient, subject: emailSubject,
       text: emailIsHtml ? emailBody.replace(/<[^>]+>/g, "") : emailBody,
-      html: emailIsHtml ? emailBody : emailBody.replace(/\n/g, "<br>"),
+      html: htmlBody,
     };
     if (attachments.length > 0) mailOptions.attachments = attachments;
 
@@ -451,6 +500,13 @@ app.post("/api/send", authMiddleware, upload.array("attachments", 10), async (re
       const transporter = createTransporter(sender);
       const info = await transporter.sendMail(mailOptions);
       console.log(`✅ [user:${req.user.id}] ${fromAddr} → ${recipient} | ${info.messageId}`);
+      // Record the sent email so its opens can be tracked.
+      try {
+        await pool.query(
+          "INSERT INTO sent_emails (user_id, tracking_id, recipient, subject, from_addr) VALUES ($1,$2,$3,$4,$5)",
+          [req.user.id, trackingId, recipient, emailSubject, fromAddr]
+        );
+      } catch (e) { console.error("Failed to record sent email:", e.message); }
       results.push({ email: recipient, ok: true, from: fromAddr, subject: emailSubject, message: "Sent successfully" });
     } catch (err) {
       console.error(`❌ [user:${req.user.id}] ${fromAddr} → ${recipient}: ${err.message}`);
@@ -658,6 +714,52 @@ app.delete("/api/body-groups/:id/items/:itemId", authMiddleware, async (req, res
   try {
     await pool.query("DELETE FROM body_items WHERE id=$1 AND group_id=$2", [req.params.itemId, req.params.id]);
     res.json({ ok: true, message: "Body deleted." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── TRACKING: List sent emails + summary ─────────────────────────────────────
+app.get("/api/tracking", authMiddleware, async (req, res) => {
+  try {
+    const list = await pool.query(
+      `SELECT id, tracking_id, recipient, subject, from_addr, open_count, first_opened_at, last_opened_at, sent_at
+       FROM sent_emails WHERE user_id=$1 ORDER BY sent_at DESC LIMIT 500`,
+      [req.user.id]
+    );
+    const summary = await pool.query(
+      `SELECT COUNT(*)::int                                   AS total_sent,
+              COUNT(*) FILTER (WHERE open_count > 0)::int      AS total_opened,
+              COALESCE(SUM(open_count), 0)::int               AS total_opens
+       FROM sent_emails WHERE user_id=$1`,
+      [req.user.id]
+    );
+    res.json({ ok: true, emails: list.rows, summary: summary.rows[0] });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── TRACKING: One email with all its opens ───────────────────────────────────
+app.get("/api/tracking/:id", authMiddleware, async (req, res) => {
+  try {
+    const e = await pool.query("SELECT * FROM sent_emails WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    if (e.rows.length === 0) return res.json({ ok: false, message: "Email not found." });
+    const opens = await pool.query(
+      "SELECT id, opened_at, user_agent, ip FROM email_opens WHERE sent_email_id=$1 ORDER BY opened_at DESC",
+      [req.params.id]
+    );
+    res.json({ ok: true, email: e.rows[0], opens: opens.rows });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── TRACKING: Delete a tracked email ─────────────────────────────────────────
+app.delete("/api/tracking/:id", authMiddleware, async (req, res) => {
+  try {
+    await pool.query("DELETE FROM sent_emails WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    res.json({ ok: true, message: "Tracking record deleted." });
   } catch (err) {
     res.json({ ok: false, message: err.message });
   }
