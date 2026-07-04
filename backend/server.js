@@ -17,6 +17,10 @@ const campaignRunner   = require("./campaignRunner");
 const uploadsDir = path.join(__dirname, "campaign_uploads");
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 
+// Persistent storage for attachment-group files (reused across campaigns).
+const attachDir = path.join(__dirname, "attachment_uploads");
+if (!fs.existsSync(attachDir)) fs.mkdirSync(attachDir, { recursive: true });
+
 const app    = express();
 const PORT   = process.env.PORT || 3001;
 const SECRET = process.env.JWT_SECRET || "mailblast_secret_change_in_production";
@@ -460,7 +464,7 @@ app.post("/api/sender-groups/:id/accounts/:accountId/test", authMiddleware, asyn
 
 // ─── CAMPAIGNS: Create & start (runs in the background) ───────────────────────
 app.post("/api/campaigns", authMiddleware, upload.array("attachments", 10), async (req, res) => {
-  const { smtpHost, smtpPort, smtpUser, smtpPass, fromName, to, subject, body, isHtml, minDelay, maxDelay, senderGroupId, subjectGroupId, bodyGroupId, name } = req.body;
+  const { smtpHost, smtpPort, smtpUser, smtpPass, fromName, to, subject, body, isHtml, minDelay, maxDelay, senderGroupId, subjectGroupId, bodyGroupId, attachmentGroupId, name } = req.body;
 
   if (!to) return res.json({ ok: false, message: "Recipient (To) is required." });
 
@@ -488,6 +492,12 @@ app.post("/api/campaigns", authMiddleware, upload.array("attachments", 10), asyn
     return res.json({ ok: false, message: "SMTP credentials are required, or select a Sender Group." });
   }
 
+  // Random attachment group (optional)
+  if (attachmentGroupId) {
+    const ag = await pool.query("SELECT 1 FROM attachment_items ai JOIN attachment_groups ag ON ag.id=ai.group_id WHERE ai.group_id=$1 AND ag.user_id=$2 LIMIT 1", [attachmentGroupId, req.user.id]);
+    if (ag.rows.length === 0) return res.json({ ok: false, message: "Attachment group has no files. Add attachments first." });
+  }
+
   const recipients = parseRecipients(to);
   if (recipients.length === 0) return res.json({ ok: false, message: "No valid email addresses found." });
 
@@ -501,14 +511,14 @@ app.post("/api/campaigns", authMiddleware, upload.array("attachments", 10), asyn
     const ins = await pool.query(
       `INSERT INTO campaigns
          (user_id, name, status, total, subject, body, is_html, subject_group_id, body_group_id, sender_group_id,
-          smtp_host, smtp_port, smtp_user, smtp_pass, from_name, min_delay, max_delay, base_url)
-       VALUES ($1,$2,'running',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id`,
+          smtp_host, smtp_port, smtp_user, smtp_pass, from_name, min_delay, max_delay, base_url, attachment_group_id)
+       VALUES ($1,$2,'running',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id`,
       [req.user.id, campaignName, recipients.length,
        subjectGroupId ? null : subject, bodyGroupId ? null : body, useHtml,
        subjectGroupId || null, bodyGroupId || null, senderGroupId || null,
        senderGroupId ? null : smtpHost, senderGroupId ? null : (parseInt(smtpPort, 10) || 587),
        senderGroupId ? null : smtpUser, senderGroupId ? null : smtpPass, senderGroupId ? null : (fromName || ""),
-       minS, maxS, baseUrl]
+       minS, maxS, baseUrl, attachmentGroupId || null]
     );
     const campaignId = ins.rows[0].id;
 
@@ -821,6 +831,103 @@ app.delete("/api/body-groups/:id/items/:itemId", authMiddleware, async (req, res
   try {
     await pool.query("DELETE FROM body_items WHERE id=$1 AND group_id=$2", [req.params.itemId, req.params.id]);
     res.json({ ok: true, message: "Body deleted." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── ATTACHMENT GROUPS: Create ────────────────────────────────────────────────
+app.post("/api/attachment-groups", authMiddleware, async (req, res) => {
+  const { name, description } = req.body;
+  if (!name) return res.json({ ok: false, message: "Group name is required." });
+  try {
+    const result = await pool.query(
+      "INSERT INTO attachment_groups (user_id, name, description) VALUES ($1, $2, $3) RETURNING *",
+      [req.user.id, name.trim(), description || ""]
+    );
+    res.json({ ok: true, group: result.rows[0], message: "Attachment group created." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── ATTACHMENT GROUPS: List ──────────────────────────────────────────────────
+app.get("/api/attachment-groups", authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT ag.*, COUNT(ai.id)::int AS item_count
+      FROM attachment_groups ag
+      LEFT JOIN attachment_items ai ON ai.group_id = ag.id
+      WHERE ag.user_id = $1
+      GROUP BY ag.id ORDER BY ag.created_at DESC
+    `, [req.user.id]);
+    res.json({ ok: true, groups: result.rows });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── ATTACHMENT GROUPS: Get one with files ────────────────────────────────────
+app.get("/api/attachment-groups/:id", authMiddleware, async (req, res) => {
+  try {
+    const g = await pool.query("SELECT * FROM attachment_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    if (g.rows.length === 0) return res.json({ ok: false, message: "Attachment group not found." });
+    const items = await pool.query("SELECT id, filename, content_type, size, created_at FROM attachment_items WHERE group_id=$1 ORDER BY sort_order ASC, created_at ASC", [req.params.id]);
+    res.json({ ok: true, group: g.rows[0], items: items.rows });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── ATTACHMENT GROUPS: Delete ────────────────────────────────────────────────
+app.delete("/api/attachment-groups/:id", authMiddleware, async (req, res) => {
+  try {
+    const g = await pool.query("SELECT id FROM attachment_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    if (g.rows.length === 0) return res.json({ ok: false, message: "Attachment group not found." });
+    await pool.query("DELETE FROM attachment_groups WHERE id=$1", [req.params.id]);
+    try { fs.rmSync(path.join(attachDir, String(req.params.id)), { recursive: true, force: true }); } catch {}
+    res.json({ ok: true, message: "Attachment group deleted." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── ATTACHMENT ITEMS: Add file (max 10 per group) ────────────────────────────
+app.post("/api/attachment-groups/:id/items", authMiddleware, upload.single("file"), async (req, res) => {
+  if (!req.file) return res.json({ ok: false, message: "No file uploaded." });
+  const g = await pool.query("SELECT id FROM attachment_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+  if (g.rows.length === 0) return res.json({ ok: false, message: "Attachment group not found." });
+  try {
+    const count = await pool.query("SELECT COUNT(*) FROM attachment_items WHERE group_id=$1", [req.params.id]);
+    const n = parseInt(count.rows[0].count);
+    if (n >= 10) return res.json({ ok: false, message: "Maximum 10 attachments per group." });
+
+    const dir = path.join(attachDir, String(req.params.id));
+    fs.mkdirSync(dir, { recursive: true });
+    const dest = path.join(dir, `${Date.now()}_${req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_")}`);
+    fs.writeFileSync(dest, req.file.buffer);
+
+    const result = await pool.query(
+      "INSERT INTO attachment_items (group_id, filename, path, content_type, size, sort_order) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, filename, content_type, size, created_at",
+      [req.params.id, req.file.originalname, dest, req.file.mimetype, req.file.size, n]
+    );
+    res.json({ ok: true, item: result.rows[0], message: "Attachment added." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── ATTACHMENT ITEMS: Delete ─────────────────────────────────────────────────
+app.delete("/api/attachment-groups/:id/items/:itemId", authMiddleware, async (req, res) => {
+  try {
+    const owned = await pool.query(
+      "SELECT ai.path FROM attachment_items ai JOIN attachment_groups ag ON ag.id=ai.group_id WHERE ai.id=$1 AND ai.group_id=$2 AND ag.user_id=$3",
+      [req.params.itemId, req.params.id, req.user.id]
+    );
+    if (owned.rows.length === 0) return res.json({ ok: false, message: "Attachment not found." });
+    await pool.query("DELETE FROM attachment_items WHERE id=$1 AND group_id=$2", [req.params.itemId, req.params.id]);
+    try { fs.rmSync(owned.rows[0].path, { force: true }); } catch {}
+    res.json({ ok: true, message: "Attachment deleted." });
   } catch (err) {
     res.json({ ok: false, message: err.message });
   }

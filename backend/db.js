@@ -173,6 +173,31 @@ async function initDB() {
 
     CREATE INDEX IF NOT EXISTS idx_campaigns_user ON campaigns(user_id);
     CREATE INDEX IF NOT EXISTS idx_camp_recipients ON campaign_recipients(campaign_id, status);
+
+    -- Attachment Groups: a pool of files, one picked at random per recipient
+    -- (mirrors subject/body groups). Files are stored on disk; the row keeps
+    -- the path so the background worker can attach them later.
+    CREATE TABLE IF NOT EXISTS attachment_groups (
+      id          SERIAL PRIMARY KEY,
+      user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      name        VARCHAR(100) NOT NULL,
+      description VARCHAR(255),
+      created_at  TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS attachment_items (
+      id           SERIAL PRIMARY KEY,
+      group_id     INTEGER REFERENCES attachment_groups(id) ON DELETE CASCADE,
+      filename     VARCHAR(255) NOT NULL,
+      path         TEXT NOT NULL,
+      content_type VARCHAR(150),
+      size         INTEGER DEFAULT 0,
+      sort_order   INTEGER DEFAULT 0,
+      created_at   TIMESTAMP DEFAULT NOW()
+    );
+
+    -- Campaigns can pick a random attachment from a group per recipient.
+    ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS attachment_group_id INTEGER;
   `);
   console.log("✅ Database tables ready");
 }

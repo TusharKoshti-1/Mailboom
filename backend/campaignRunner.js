@@ -82,6 +82,14 @@ async function runLoop(campaignId) {
 
   const attachments = Array.isArray(c.attachments) ? c.attachments : [];
   const mailAttachments = attachments.map(a => ({ filename: a.filename, path: a.path, contentType: a.contentType }));
+
+  // Preload the attachment pool when a random attachment group is used.
+  let attachmentItems = null;
+  if (c.attachment_group_id) {
+    const r = await pool.query("SELECT filename, path, content_type FROM attachment_items WHERE group_id=$1", [c.attachment_group_id]);
+    if (r.rows.length > 0) attachmentItems = r.rows;
+  }
+
   const transporters = new Map(); // username -> transporter (reused across sends)
 
   const getTransporter = (sender) => {
@@ -139,7 +147,14 @@ async function runLoop(campaignId) {
       text: emailIsHtml ? emailBody.replace(/<[^>]+>/g, "") : emailBody,
       html: htmlBody,
     };
-    if (mailAttachments.length > 0) mailOptions.attachments = mailAttachments;
+    // A random-attachment group (if set) overrides the fixed attachments — one
+    // random file per recipient, mirroring random subject/body.
+    if (attachmentItems) {
+      const a = pickRandom(attachmentItems);
+      mailOptions.attachments = [{ filename: a.filename, path: a.path, contentType: a.content_type }];
+    } else if (mailAttachments.length > 0) {
+      mailOptions.attachments = mailAttachments;
+    }
 
     try {
       await getTransporter(sender).sendMail(mailOptions);

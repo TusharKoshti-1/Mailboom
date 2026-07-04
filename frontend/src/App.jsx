@@ -765,6 +765,11 @@ function ComposePage({ authHeader }) {
   const [bodyGroupId,  setBodyGroupId]  = useState("");
   const [useBodyGroup, setUseBodyGroup] = useState(false);
 
+  // Attachment groups (random attachment)
+  const [attachmentGroups,   setAttachmentGroups]   = useState([]);
+  const [attachmentGroupId,  setAttachmentGroupId]  = useState("");
+  const [useAttachmentGroup, setUseAttachmentGroup] = useState(false);
+
   const [to,       setTo]       = useState("");
   const [subject,  setSubject]  = useState("");
   const [body,     setBody]     = useState("");
@@ -817,6 +822,12 @@ function ComposePage({ authHeader }) {
       .then(r => r.json())
       .then(data => { if (data.ok) setBodyGroups(data.groups); })
       .catch(() => {});
+
+    // Load attachment groups
+    fetch("/api/attachment-groups", { headers: authHeader })
+      .then(r => r.json())
+      .then(data => { if (data.ok) setAttachmentGroups(data.groups); })
+      .catch(() => {});
   }, []);
 
   useEffect(() => { if (location.state?.prefilledTo) setTo(location.state.prefilledTo); }, [location.state]);
@@ -862,6 +873,7 @@ function ComposePage({ authHeader }) {
     if (!useSubjectGroup && !subject)       return addLog("error", "❌ Enter a subject or select a Subject Group.");
     if (useBodyGroup && !bodyGroupId)       return addLog("error", "❌ Select a Body Group.");
     if (!useBodyGroup && !body)             return addLog("error", "❌ Write a message body or select a Body Group.");
+    if (useAttachmentGroup && !attachmentGroupId) return addLog("error", "❌ Select an Attachment Group.");
     if (recipientList.length === 0) return addLog("error", "❌ No valid emails found.");
 
     const min = parseFloat(minDelay)||30;
@@ -895,7 +907,11 @@ function ComposePage({ authHeader }) {
     }
     fd.append("name", subject || "Campaign");
     fd.append("minDelay", min);    fd.append("maxDelay", max);
-    attachments.forEach(f => fd.append("attachments", f, f.name));
+    if (useAttachmentGroup && attachmentGroupId) {
+      fd.append("attachmentGroupId", attachmentGroupId);
+    } else {
+      attachments.forEach(f => fd.append("attachments", f, f.name));
+    }
 
     try {
       const res  = await fetch("/api/campaigns", { method:"POST", headers: authHeader, body:fd });
@@ -1039,21 +1055,42 @@ function ComposePage({ authHeader }) {
 
         {/* Attachments */}
         <div style={{ padding:"16px 18px" }}>
-          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12 }}>
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10 }}>
             <div style={{ display:"flex", alignItems:"center", gap:8 }}><Paperclip size={14} color="var(--green)"/><span style={{ fontWeight:600, fontSize:13 }}>Attachments</span></div>
-            {attachments.length>0 && <span style={{ ...S.chip, background:"var(--green-dim)", color:"var(--green)" }}>{attachments.length}</span>}
+            <ModeToggle value={useAttachmentGroup} onChange={setUseAttachmentGroup}/>
           </div>
-          <div onClick={() => fileRef.current?.click()} onDragOver={e => e.preventDefault()}
-            onDrop={e => { e.preventDefault(); addFiles(e.dataTransfer.files); }}
-            style={{ border:"2px dashed var(--border2)", borderRadius:"var(--radius)", padding:"16px", textAlign:"center", cursor:"pointer", color:"var(--text3)", transition:"all 0.15s", marginBottom:attachments.length?10:0 }}
-            onMouseEnter={e => { e.currentTarget.style.borderColor="var(--accent)"; e.currentTarget.style.color="var(--accent)"; }}
-            onMouseLeave={e => { e.currentTarget.style.borderColor="var(--border2)"; e.currentTarget.style.color="var(--text3)"; }}>
-            <Upload size={17} style={{ display:"block", margin:"0 auto 5px" }}/>
-            <div style={{ fontSize:12 }}>Drop or click to browse</div>
-            <div style={{ fontSize:10, marginTop:3 }}>Max 25MB</div>
-          </div>
-          <input ref={fileRef} type="file" multiple style={{ display:"none" }} onChange={e => { addFiles(e.target.files); e.target.value=""; }}/>
-          {attachments.map(f => <FileChip key={f.name+f.size} file={f} onRemove={r => setAttachments(p => p.filter(x => x!==r))}/>)}
+
+          {!useAttachmentGroup ? (
+            <>
+              <div onClick={() => fileRef.current?.click()} onDragOver={e => e.preventDefault()}
+                onDrop={e => { e.preventDefault(); addFiles(e.dataTransfer.files); }}
+                style={{ border:"2px dashed var(--border2)", borderRadius:"var(--radius)", padding:"16px", textAlign:"center", cursor:"pointer", color:"var(--text3)", transition:"all 0.15s", marginBottom:attachments.length?10:0 }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor="var(--accent)"; e.currentTarget.style.color="var(--accent)"; }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor="var(--border2)"; e.currentTarget.style.color="var(--text3)"; }}>
+                <Upload size={17} style={{ display:"block", margin:"0 auto 5px" }}/>
+                <div style={{ fontSize:12 }}>Drop or click to browse</div>
+                <div style={{ fontSize:10, marginTop:3 }}>Max 25MB · same files sent to all</div>
+              </div>
+              <input ref={fileRef} type="file" multiple style={{ display:"none" }} onChange={e => { addFiles(e.target.files); e.target.value=""; }}/>
+              {attachments.map(f => <FileChip key={f.name+f.size} file={f} onRemove={r => setAttachments(p => p.filter(x => x!==r))}/>)}
+            </>
+          ) : attachmentGroups.length === 0 ? (
+            <div style={{ padding:"14px", background:"var(--surface2)", borderRadius:"var(--radius)", fontSize:12, color:"var(--text3)", lineHeight:1.6 }}>
+              No attachment groups yet.<br/>Go to <strong style={{ color:"#f97316" }}>Attachment Groups</strong> page to create one and upload files.
+            </div>
+          ) : (
+            <>
+              <select value={attachmentGroupId} onChange={e => setAttachmentGroupId(e.target.value)} style={S.select} onFocus={onFocus} onBlur={onBlur}>
+                <option value="">— Select an attachment group —</option>
+                {attachmentGroups.map(g => <option key={g.id} value={g.id}>{g.name} ({g.item_count} files)</option>)}
+              </select>
+              {attachmentGroupId && (
+                <div style={{ marginTop:8, padding:"8px 12px", background:"rgba(249,115,22,0.08)", border:"1px solid rgba(249,115,22,0.25)", borderRadius:"var(--radius)", fontSize:12, color:"#f97316", lineHeight:1.6 }}>
+                  ✓ Each recipient gets one random file from this group
+                </div>
+              )}
+            </>
+          )}
         </div>
       </div>
 
@@ -1501,6 +1538,237 @@ const BODY_CFG = {
 
 function SubjectGroupsPage({ authHeader }) { return <ItemGroupsPage authHeader={authHeader} cfg={SUBJECT_CFG}/>; }
 function BodyGroupsPage({ authHeader })    { return <ItemGroupsPage authHeader={authHeader} cfg={BODY_CFG}/>; }
+
+// ─── ATTACHMENT GROUPS PAGE ───────────────────────────────────────────────────
+const AC = "#f97316"; // orange accent for attachments
+const fmtSize = (b) => b > 1048576 ? `${(b/1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b/1024))} KB`;
+
+function AttachmentGroupsPage({ authHeader }) {
+  const [groups,      setGroups]      = useState([]);
+  const [view,        setView]        = useState("list");
+  const [activeGroup, setActiveGroup] = useState(null);
+  const [items,       setItems]       = useState([]);
+  const [loading,     setLoading]     = useState(false);
+  const [msg,         setMsg]         = useState(null);
+  const [newName,     setNewName]     = useState("");
+  const [newDesc,     setNewDesc]     = useState("");
+  const [uploading,   setUploading]   = useState(false);
+  const fileRef = useRef();
+
+  const showMsg = (type, text) => { setMsg({ type, text }); setTimeout(() => setMsg(null), 3000); };
+
+  const loadGroups = async () => {
+    setLoading(true);
+    try {
+      const res  = await fetch("/api/attachment-groups", { headers: authHeader });
+      const data = await res.json();
+      if (data.ok) setGroups(data.groups);
+    } catch {}
+    setLoading(false);
+  };
+
+  const loadGroup = async (g) => {
+    try {
+      const res  = await fetch(`/api/attachment-groups/${g.id}`, { headers: authHeader });
+      const data = await res.json();
+      if (data.ok) { setActiveGroup(data.group); setItems(data.items); setView("detail"); }
+    } catch {}
+  };
+
+  useEffect(() => { loadGroups(); }, []);
+
+  const handleCreate = async () => {
+    if (!newName.trim()) return showMsg("error", "Group name is required.");
+    try {
+      const res  = await fetch("/api/attachment-groups", { method:"POST", headers:{ ...authHeader, "Content-Type":"application/json" }, body:JSON.stringify({ name:newName, description:newDesc }) });
+      const data = await res.json();
+      if (data.ok) { showMsg("success", "Attachment group created!"); setNewName(""); setNewDesc(""); setView("list"); loadGroups(); }
+      else showMsg("error", data.message);
+    } catch { showMsg("error", "Failed to create group."); }
+  };
+
+  const handleDelete = async (id) => {
+    if (!confirm("Delete this attachment group and all its files?")) return;
+    try {
+      await fetch(`/api/attachment-groups/${id}`, { method:"DELETE", headers: authHeader });
+      showMsg("success", "Group deleted."); loadGroups();
+    } catch {}
+  };
+
+  const handleUpload = async (files) => {
+    const list = Array.from(files || []);
+    if (list.length === 0) return;
+    const room = 10 - items.length;
+    if (room <= 0) return showMsg("error", "Maximum 10 attachments per group.");
+    const toUpload = list.slice(0, room);
+    setUploading(true);
+    let added = 0, lastErr = "";
+    for (const f of toUpload) {
+      try {
+        const fd = new FormData();
+        fd.append("file", f, f.name);
+        const res  = await fetch(`/api/attachment-groups/${activeGroup.id}/items`, { method:"POST", headers: authHeader, body: fd });
+        const data = await res.json();
+        if (data.ok) added++; else lastErr = data.message;
+      } catch { lastErr = "Upload failed."; }
+    }
+    if (added)   showMsg("success", `${added} file(s) added.`);
+    else if (lastErr) showMsg("error", lastErr);
+    if (list.length > room) showMsg("error", `Only ${room} more allowed — extra files skipped.`);
+    await loadGroup(activeGroup);
+    setUploading(false);
+  };
+
+  const handleDeleteItem = async (itemId) => {
+    try {
+      await fetch(`/api/attachment-groups/${activeGroup.id}/items/${itemId}`, { method:"DELETE", headers: authHeader });
+      setItems(p => p.filter(it => it.id !== itemId));
+      showMsg("success", "Attachment deleted.");
+    } catch {}
+  };
+
+  return (
+    <div style={{ flex:1, padding:"28px 32px", overflowY:"auto" }}>
+      <Toast msg={msg}/>
+
+      {/* List */}
+      {view === "list" && (
+        <>
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:24 }}>
+            <div>
+              <div style={{ fontWeight:800, fontSize:22, letterSpacing:"-0.5px" }}>Attachment Groups</div>
+              <div style={{ color:"var(--text3)", fontSize:13, marginTop:3 }}>Add up to 10 files per group. Each recipient gets a randomly picked attachment.</div>
+            </div>
+            <button onClick={() => setView("create")} style={{ ...S.btnPrimary }}><Plus size={15}/> New Attachment Group</button>
+          </div>
+
+          {loading && <div style={{ color:"var(--text3)", fontSize:13 }}>Loading...</div>}
+          {!loading && groups.length === 0 && (
+            <div style={{ textAlign:"center", padding:"60px 0", color:"var(--text3)" }}>
+              <Paperclip size={40} style={{ opacity:0.3, display:"block", margin:"0 auto 12px" }}/>
+              <div style={{ fontSize:15, fontWeight:600, marginBottom:6 }}>No attachment groups yet</div>
+              <div style={{ fontSize:13 }}>Create a group and upload files to rotate through.</div>
+            </div>
+          )}
+
+          <div style={{ display:"grid", gap:12 }}>
+            {groups.map(g => (
+              <div key={g.id} style={{ display:"flex", alignItems:"center", gap:16, padding:"16px 20px", background:"var(--surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-lg)", transition:"border-color 0.15s" }}
+                onMouseEnter={e => e.currentTarget.style.borderColor="var(--border2)"}
+                onMouseLeave={e => e.currentTarget.style.borderColor="var(--border)"}>
+                <div style={{ width:40, height:40, background:`${AC}22`, borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+                  <Paperclip size={18} color={AC}/>
+                </div>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontWeight:700, fontSize:15 }}>{g.name}</div>
+                  {g.description && <div style={{ fontSize:12, color:"var(--text3)", marginTop:2 }}>{g.description}</div>}
+                  <div style={{ fontSize:11, color:"var(--text3)", marginTop:4, fontFamily:"var(--font-mono)" }}>
+                    {g.item_count}/10 files · {new Date(g.created_at).toLocaleDateString()}
+                  </div>
+                </div>
+                <div style={{ display:"flex", gap:8 }}>
+                  <button onClick={() => loadGroup(g)} style={{ ...S.btnSecondary, fontSize:12, padding:"7px 14px" }}><ChevronRight size={14}/> Manage</button>
+                  <button onClick={() => handleDelete(g.id)} style={{ ...S.btnSecondary, fontSize:12, padding:"7px 10px" }}
+                    onMouseEnter={e => { e.currentTarget.style.borderColor="var(--red)"; e.currentTarget.style.color="var(--red)"; }}
+                    onMouseLeave={e => { e.currentTarget.style.borderColor="var(--border2)"; e.currentTarget.style.color="var(--text2)"; }}>
+                    <Trash2 size={13}/>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* Create */}
+      {view === "create" && (
+        <>
+          <button onClick={() => setView("list")} style={{ ...S.btnSecondary, marginBottom:24, width:"fit-content" }}><ArrowLeft size={13}/> Back</button>
+          <div style={{ maxWidth:520 }}>
+            <div style={{ fontWeight:800, fontSize:22, marginBottom:6 }}>Create Attachment Group</div>
+            <div style={{ color:"var(--text3)", fontSize:13, marginBottom:24 }}>Name your group then upload up to 10 files.</div>
+            <div style={S.card}>
+              <TextInput label="Group Name" value={newName} onChange={setNewName} placeholder="e.g. Brochures" mono={false}/>
+              <Field label="Description (optional)">
+                <input value={newDesc} onChange={e => setNewDesc(e.target.value)} placeholder="What are these files for?"
+                  style={{ ...S.input, fontFamily:"var(--font-display)" }} onFocus={onFocus} onBlur={onBlur}/>
+              </Field>
+              <div style={{ display:"flex", gap:8 }}>
+                <button onClick={handleCreate} style={{ ...S.btnPrimary, flex:1 }}><Plus size={14}/> Create Group</button>
+                <button onClick={() => setView("list")} style={S.btnSecondary}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Detail */}
+      {view === "detail" && activeGroup && (
+        <>
+          <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:24 }}>
+            <button onClick={() => { setView("list"); loadGroups(); }} style={{ ...S.btnSecondary, width:"fit-content" }}><ArrowLeft size={13}/> Back</button>
+            <div style={{ flex:1 }}>
+              <div style={{ fontWeight:800, fontSize:22 }}>{activeGroup.name}</div>
+              {activeGroup.description && <div style={{ color:"var(--text3)", fontSize:13 }}>{activeGroup.description}</div>}
+            </div>
+            <span style={{ ...S.chip, background:`${AC}22`, color:AC, fontSize:13, padding:"4px 12px" }}>{items.length}/10 files</span>
+          </div>
+
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:20, alignItems:"start" }}>
+            {/* Upload */}
+            <div style={S.card}>
+              <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:16 }}>
+                <Upload size={15} color={AC}/><span style={{ fontWeight:700, fontSize:15 }}>Upload Files</span>
+              </div>
+              <input ref={fileRef} type="file" multiple style={{ display:"none" }} onChange={e => { handleUpload(e.target.files); e.target.value=""; }}/>
+              <div onClick={() => !uploading && items.length<10 && fileRef.current?.click()}
+                onDragOver={e => e.preventDefault()}
+                onDrop={e => { e.preventDefault(); if (!uploading && items.length<10) handleUpload(e.dataTransfer.files); }}
+                style={{ border:`2px dashed ${items.length>=10?"var(--border)":"var(--border2)"}`, borderRadius:"var(--radius)", padding:"28px 16px", textAlign:"center", cursor: items.length>=10?"not-allowed":"pointer", color:"var(--text3)", transition:"all 0.15s" }}
+                onMouseEnter={e => { if (items.length<10 && !uploading) { e.currentTarget.style.borderColor=AC; e.currentTarget.style.color=AC; } }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor=items.length>=10?"var(--border)":"var(--border2)"; e.currentTarget.style.color="var(--text3)"; }}>
+                {uploading ? <><Loader2 size={20} style={{ animation:"spin 1s linear infinite", display:"block", margin:"0 auto 6px" }}/> Uploading...</>
+                  : items.length>=10 ? <div style={{ fontSize:13 }}>Group is full (10/10). Delete a file to add more.</div>
+                  : <><Upload size={20} style={{ display:"block", margin:"0 auto 6px" }}/><div style={{ fontSize:13 }}>Drop files or click to browse</div><div style={{ fontSize:11, marginTop:3 }}>Up to 10 files · Max 25MB each</div></>}
+              </div>
+              <div style={{ fontSize:11, color:"var(--text3)", marginTop:12, lineHeight:1.6 }}>
+                Each email in a campaign will include <strong style={{ color:AC }}>one random file</strong> from this group.
+              </div>
+            </div>
+
+            {/* Files list */}
+            <div style={{ ...S.card, padding:0, overflow:"hidden" }}>
+              <div style={{ padding:"16px 20px", borderBottom:"1px solid var(--border)", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+                <span style={{ fontWeight:700, fontSize:15 }}>Files</span>
+                <span style={{ ...S.chip, background:"var(--surface2)", color:"var(--text2)" }}>{items.length}/10</span>
+              </div>
+              {items.length === 0 && <div style={{ padding:"40px 20px", textAlign:"center", color:"var(--text3)", fontSize:13 }}>No files yet. Upload on the left.</div>}
+              <div style={{ maxHeight:520, overflowY:"auto" }}>
+                {items.map((it, i) => (
+                  <div key={it.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"12px 20px", borderBottom:"1px solid var(--border)" }}>
+                    <div style={{ width:26, height:26, borderRadius:6, background:`${AC}22`, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontSize:11, fontWeight:700, color:AC, fontFamily:"var(--font-mono)" }}>{i+1}</div>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontSize:13, fontWeight:600, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{it.filename}</div>
+                      <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"var(--font-mono)" }}>{fmtSize(it.size)}{it.content_type ? ` · ${it.content_type}` : ""}</div>
+                    </div>
+                    <button onClick={() => handleDeleteItem(it.id)} style={{ background:"none", border:"none", cursor:"pointer", color:"var(--text3)", padding:4 }}
+                      onMouseEnter={e => e.currentTarget.style.color="var(--red)"}
+                      onMouseLeave={e => e.currentTarget.style.color="var(--text3)"}><Trash2 size={13}/></button>
+                  </div>
+                ))}
+              </div>
+              {items.length > 0 && (
+                <div style={{ padding:"12px 20px", background:`${AC}0f`, borderTop:"1px solid var(--border)" }}>
+                  <div style={{ fontSize:11, color:AC, fontFamily:"var(--font-mono)" }}>✓ Each recipient gets a randomly picked file</div>
+                </div>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 
 // ─── TRACKING PAGE (list + summary) ───────────────────────────────────────────
@@ -1987,6 +2255,7 @@ function MainApp({ user, token, onLogout }) {
     { to:"/campaigns",        label:"Campaigns",         icon:<Send size={13}/> },
     { to:"/subject-groups",   label:"Subject Groups",    icon:<Type size={13}/> },
     { to:"/body-groups",      label:"Body Groups",       icon:<FileText size={13}/> },
+    { to:"/attachment-groups",label:"Attachment Groups", icon:<Paperclip size={13}/> },
     { to:"/sender-groups",    label:"Sender Groups",     icon:<AtSign size={13}/> },
     { to:"/recipient-groups", label:"Recipient Groups",  icon:<Users size={13}/> },
     { to:"/tracking",         label:"Tracking",          icon:<Activity size={13}/> },
@@ -2032,6 +2301,7 @@ function MainApp({ user, token, onLogout }) {
         <Route path="/campaigns/:id"    element={<CampaignDetailPage authHeader={authHeader}/>}/>
         <Route path="/subject-groups"   element={<SubjectGroupsPage authHeader={authHeader}/>}/>
         <Route path="/body-groups"      element={<BodyGroupsPage authHeader={authHeader}/>}/>
+        <Route path="/attachment-groups" element={<AttachmentGroupsPage authHeader={authHeader}/>}/>
         <Route path="/sender-groups"    element={<SenderGroupsPage authHeader={authHeader}/>}/>
         <Route path="/recipient-groups" element={<RecipientGroupsPage authHeader={authHeader}/>}/>
         <Route path="/tracking"         element={<TrackingPage authHeader={authHeader}/>}/>
