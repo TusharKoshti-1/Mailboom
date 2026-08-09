@@ -11,6 +11,7 @@ const crypto     = require("crypto");
 const XLSX       = require("xlsx");
 const { pool, initDB } = require("./db");
 const campaignRunner   = require("./campaignRunner");
+const emailVerifier    = require("./emailVerifier");
 
 // Where campaign attachments are persisted so the background worker can read
 // them after the request that created the campaign is long gone.
@@ -1018,6 +1019,212 @@ app.delete("/api/tracking/:id", authMiddleware, async (req, res) => {
   }
 });
 
+// ─── EMAIL VERIFIER ────────────────────────────────────────────────────────────
+// Bulk-insert helper: chunks INSERTs so a 10,000-row file doesn't issue
+// 10,000 separate queries.
+async function bulkInsertVerifyRows(batchId, rows) {
+  const CHUNK = 500;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const slice = rows.slice(i, i + CHUNK);
+    const values = [];
+    const params = [];
+    slice.forEach((r, j) => {
+      const base = j * 5;
+      values.push(`($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5})`);
+      params.push(batchId, r.email, r.status, r.reason || null, r.idx);
+    });
+    await pool.query(
+      `INSERT INTO verify_results (batch_id, email, status, reason, idx) VALUES ${values.join(",")}`,
+      params
+    );
+  }
+  const dupCount = rows.filter(r => r.status === "duplicate").length;
+  if (dupCount > 0) {
+    await pool.query(
+      "UPDATE verify_results SET checked_at=NOW() WHERE batch_id=$1 AND status='duplicate' AND checked_at IS NULL",
+      [batchId]
+    );
+  }
+}
+
+// Upload an .xlsx / .xls / .csv, extract every email address found in any
+// cell, create a batch, and kick off background verification. Duplicate
+// addresses within the same file are flagged immediately (no DNS lookup
+// needed) so the count is accurate right away.
+app.post("/api/verify/upload", authMiddleware, upload.single("file"), async (req, res) => {
+  if (!req.file) return res.json({ ok: false, message: "No file uploaded." });
+  try {
+    const wb = XLSX.read(req.file.buffer, { type: "buffer" });
+    const emailRe = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+    const foundOrdered = [];
+    wb.SheetNames.forEach(name => {
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, blankrows: false, defval: "" });
+      rows.forEach(row => row.forEach(cell => {
+        const matches = String(cell).match(emailRe);
+        if (matches) matches.forEach(m => foundOrdered.push(m.trim().toLowerCase()));
+      }));
+    });
+    if (foundOrdered.length === 0) return res.json({ ok: false, message: "No email addresses found in the file." });
+
+    const name = (req.body.name && String(req.body.name).trim()) || req.file.originalname.replace(/\.[^.]+$/, "");
+    const bRes = await pool.query(
+      "INSERT INTO verify_batches (user_id, name, status, total) VALUES ($1,$2,'running',$3) RETURNING *",
+      [req.user.id, name, foundOrdered.length]
+    );
+    const batch = bRes.rows[0];
+
+    const seen = new Set();
+    const rows = foundOrdered.map((email, idx) => {
+      if (seen.has(email)) return { email, idx, status: "duplicate", reason: "Duplicate email in uploaded file" };
+      seen.add(email);
+      return { email, idx, status: "pending" };
+    });
+    await bulkInsertVerifyRows(batch.id, rows);
+
+    const dupCount = foundOrdered.length - seen.size;
+    await pool.query("UPDATE verify_batches SET duplicate_count=$1, checked=$1 WHERE id=$2", [dupCount, batch.id]);
+
+    emailVerifier.startVerification(batch.id);
+    res.json({
+      ok: true,
+      batch: { ...batch, duplicate_count: dupCount, checked: dupCount },
+      message: `${foundOrdered.length} email(s) found (${seen.size} unique, ${dupCount} duplicate). Verifying now...`,
+    });
+  } catch (err) {
+    res.json({ ok: false, message: `Could not read the file: ${err.message}` });
+  }
+});
+
+// ─── EMAIL VERIFIER: List batches ──────────────────────────────────────────────
+app.get("/api/verify/batches", authMiddleware, async (req, res) => {
+  try {
+    const r = await pool.query("SELECT * FROM verify_batches WHERE user_id=$1 ORDER BY created_at DESC", [req.user.id]);
+    res.json({ ok: true, batches: r.rows });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── EMAIL VERIFIER: Batch detail (poll this for progress) ────────────────────
+app.get("/api/verify/batches/:id", authMiddleware, async (req, res) => {
+  try {
+    const b = await pool.query("SELECT * FROM verify_batches WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    if (b.rows.length === 0) return res.json({ ok: false, message: "Batch not found." });
+    res.json({ ok: true, batch: b.rows[0] });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── EMAIL VERIFIER: Paginated results, optionally filtered by category ───────
+app.get("/api/verify/batches/:id/results", authMiddleware, async (req, res) => {
+  try {
+    const b = await pool.query("SELECT id FROM verify_batches WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    if (b.rows.length === 0) return res.json({ ok: false, message: "Batch not found." });
+
+    const status = String(req.query.status || "all").toLowerCase();
+    const limit  = Math.min(parseInt(req.query.limit, 10) || 100, 500);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+    const params = [req.params.id];
+    let where = "batch_id=$1";
+    if (["valid", "invalid", "risky", "duplicate", "pending"].includes(status)) {
+      params.push(status);
+      where += ` AND status=$${params.length}`;
+    }
+    params.push(limit, offset);
+    const r = await pool.query(
+      `SELECT id, email, status, reason, checked_at FROM verify_results WHERE ${where}
+       ORDER BY idx ASC, id ASC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    );
+    res.json({ ok: true, results: r.rows });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── EMAIL VERIFIER: Export a category (or all) as .xlsx ──────────────────────
+app.get("/api/verify/batches/:id/export", authMiddleware, async (req, res) => {
+  try {
+    const b = await pool.query("SELECT name FROM verify_batches WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    if (b.rows.length === 0) return res.status(404).json({ ok: false, message: "Batch not found." });
+
+    const status = String(req.query.status || "all").toLowerCase();
+    const params = [req.params.id];
+    let where = "batch_id=$1";
+    if (["valid", "invalid", "risky", "duplicate", "pending"].includes(status)) {
+      params.push(status);
+      where += ` AND status=$${params.length}`;
+    }
+    const r = await pool.query(
+      `SELECT email, status, reason FROM verify_results WHERE ${where} ORDER BY idx ASC, id ASC`,
+      params
+    );
+
+    const aoa = [["Email", "Category", "Reason"], ...r.rows.map(row => [row.email, row.status, row.reason || ""])];
+    const ws  = XLSX.utils.aoa_to_sheet(aoa);
+    ws["!cols"] = [{ wch: 38 }, { wch: 12 }, { wch: 48 }];
+    const wb  = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Emails");
+    const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+
+    const safeName = (b.rows[0].name || "verified-emails").replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 60);
+    const suffix = status === "all" ? "all" : status;
+    res.set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.set("Content-Disposition", `attachment; filename="${safeName}_${suffix}.xlsx"`);
+    res.send(buf);
+  } catch (err) {
+    res.status(500).json({ ok: false, message: err.message });
+  }
+});
+
+// ─── EMAIL VERIFIER: Pause / Resume / Stop / Delete ────────────────────────────
+app.post("/api/verify/batches/:id/pause", authMiddleware, async (req, res) => {
+  try {
+    const r = await pool.query("UPDATE verify_batches SET status='paused' WHERE id=$1 AND user_id=$2 AND status='running' RETURNING id", [req.params.id, req.user.id]);
+    if (r.rows.length === 0) return res.json({ ok: false, message: "Batch is not running." });
+    emailVerifier.signalPause(req.params.id);
+    res.json({ ok: true, message: "Verification paused." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+app.post("/api/verify/batches/:id/resume", authMiddleware, async (req, res) => {
+  try {
+    const r = await pool.query("UPDATE verify_batches SET status='running' WHERE id=$1 AND user_id=$2 AND status='paused' RETURNING id", [req.params.id, req.user.id]);
+    if (r.rows.length === 0) return res.json({ ok: false, message: "Batch is not paused." });
+    emailVerifier.startVerification(req.params.id);
+    res.json({ ok: true, message: "Verification resumed." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+app.post("/api/verify/batches/:id/stop", authMiddleware, async (req, res) => {
+  try {
+    const r = await pool.query("UPDATE verify_batches SET status='stopped', finished_at=NOW() WHERE id=$1 AND user_id=$2 AND status IN ('running','paused') RETURNING id", [req.params.id, req.user.id]);
+    if (r.rows.length === 0) return res.json({ ok: false, message: "Batch is not active." });
+    emailVerifier.signalStop(req.params.id);
+    res.json({ ok: true, message: "Verification stopped." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+app.delete("/api/verify/batches/:id", authMiddleware, async (req, res) => {
+  try {
+    const owned = await pool.query("SELECT id FROM verify_batches WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    if (owned.rows.length === 0) return res.json({ ok: false, message: "Batch not found." });
+    emailVerifier.signalStop(req.params.id);
+    await pool.query("DELETE FROM verify_batches WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    res.json({ ok: true, message: "Batch deleted." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
 // ─── SPA Fallback — MUST BE LAST ─────────────────────────────────────────────
 app.get("*", (req, res) => {
   const index = path.join(frontendPath, "index.html");
@@ -1027,8 +1234,9 @@ app.get("*", (req, res) => {
 // ─── Start ────────────────────────────────────────────────────────────────────
 initDB().then(() => {
   app.listen(PORT, "0.0.0.0", () => console.log(`✉  MailBlast running → http://localhost:${PORT}`));
-  // Resume any campaigns that were mid-send when the server last stopped.
+  // Resume any campaigns / verification batches that were mid-run when the server last stopped.
   campaignRunner.resumeAll();
+  emailVerifier.resumeAll();
 }).catch(err => {
   console.error("❌ Database connection failed:", err.message);
   process.exit(1);

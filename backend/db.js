@@ -198,6 +198,40 @@ async function initDB() {
 
     -- Campaigns can pick a random attachment from a group per recipient.
     ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS attachment_group_id INTEGER;
+
+    -- Email Verifier: a batch is one uploaded spreadsheet. Verification runs
+    -- in the background (see emailVerifier.js), same pattern as campaigns, so
+    -- it keeps going after the browser is closed.
+    -- Status: running | paused | completed | stopped.
+    CREATE TABLE IF NOT EXISTS verify_batches (
+      id              SERIAL PRIMARY KEY,
+      user_id         INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      name            VARCHAR(160),
+      status          VARCHAR(20) DEFAULT 'running',
+      total           INTEGER DEFAULT 0,
+      checked         INTEGER DEFAULT 0,
+      valid_count     INTEGER DEFAULT 0,
+      invalid_count   INTEGER DEFAULT 0,
+      risky_count     INTEGER DEFAULT 0,
+      duplicate_count INTEGER DEFAULT 0,
+      created_at      TIMESTAMP DEFAULT NOW(),
+      finished_at     TIMESTAMP
+    );
+
+    -- One row per email address found in the uploaded file.
+    -- Status: pending | valid | invalid | risky | duplicate.
+    CREATE TABLE IF NOT EXISTS verify_results (
+      id          SERIAL PRIMARY KEY,
+      batch_id    INTEGER REFERENCES verify_batches(id) ON DELETE CASCADE,
+      email       VARCHAR(255) NOT NULL,
+      status      VARCHAR(20) DEFAULT 'pending',
+      reason      VARCHAR(160),
+      idx         INTEGER DEFAULT 0,
+      checked_at  TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_verify_batches_user ON verify_batches(user_id);
+    CREATE INDEX IF NOT EXISTS idx_verify_results_batch ON verify_results(batch_id, status);
   `);
   console.log("✅ Database tables ready");
 }

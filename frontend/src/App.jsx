@@ -6,6 +6,7 @@ import {
   Clock, Users, LogOut, User, Save, Plus, Trash2, ChevronRight,
   ArrowLeft, FolderOpen, UserPlus, AtSign, CheckCircle, FileText, Edit2, Type,
   Activity, BarChart3, MailOpen, Download,
+  ShieldCheck, MailCheck, MailX, MailQuestion, Copy, ListChecks,
 } from "lucide-react";
 
 const onFocus = e => e.target.style.borderColor = "var(--accent)";
@@ -2246,6 +2247,322 @@ function CampaignDetailPage({ authHeader }) {
   );
 }
 
+// ─── EMAIL VERIFIER ─────────────────────────────────────────────────────────────
+const VERIFY_CATS = {
+  valid:     { label:"Verified",     color:"var(--green)", dim:"var(--green-dim)", icon:<MailCheck size={14}/> },
+  risky:     { label:"Risky",        color:"var(--amber)", dim:"var(--amber-dim)", icon:<MailQuestion size={14}/> },
+  invalid:   { label:"Not Verified", color:"var(--red)",   dim:"var(--red-dim)",   icon:<MailX size={14}/> },
+  duplicate: { label:"Duplicate",    color:"var(--text3)", dim:"var(--surface2)",  icon:<Copy size={14}/> },
+};
+
+function VerifyProgressBar({ batch }) {
+  const total = batch.total || 0;
+  const pct = total > 0 ? Math.round((batch.checked / total) * 100) : 0;
+  const seg = (n) => total > 0 ? (n / total) * 100 : 0;
+  return (
+    <div>
+      <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:"var(--text3)", fontFamily:"var(--font-mono)", marginBottom:5 }}>
+        <span>{batch.checked} / {total} checked</span><span>{pct}%</span>
+      </div>
+      <div style={{ height:6, background:"var(--border)", borderRadius:3, overflow:"hidden", display:"flex" }}>
+        <div style={{ height:"100%", background:"var(--green)", width:`${seg(batch.valid_count)}%`, transition:"width 0.4s ease" }}/>
+        <div style={{ height:"100%", background:"var(--amber)", width:`${seg(batch.risky_count)}%`, transition:"width 0.4s ease" }}/>
+        <div style={{ height:"100%", background:"var(--red)",   width:`${seg(batch.invalid_count)}%`, transition:"width 0.4s ease" }}/>
+        <div style={{ height:"100%", background:"var(--text3)", width:`${seg(batch.duplicate_count)}%`, transition:"width 0.4s ease" }}/>
+      </div>
+    </div>
+  );
+}
+
+function EmailVerifierPage({ authHeader }) {
+  const navigate = useNavigate();
+  const [batches, setBatches] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [uploading, setUploading] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const fileRef = useRef();
+
+  const showMsg = (type, text) => { setMsg({ type, text }); setTimeout(() => setMsg(null), 3000); };
+
+  const load = async () => {
+    try {
+      const res  = await fetch("/api/verify/batches", { headers: authHeader });
+      const data = await res.json();
+      if (data.ok) setBatches(data.batches);
+    } catch {}
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); const t = setInterval(load, 3000); return () => clearInterval(t); }, []);
+
+  const handleUpload = async (file) => {
+    if (!file) return;
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file, file.name);
+      const res  = await fetch("/api/verify/upload", { method:"POST", headers: authHeader, body: fd });
+      const data = await res.json();
+      if (data.ok) { showMsg("success", data.message); navigate(`/email-verifier/${data.batch.id}`); }
+      else showMsg("error", data.message);
+    } catch { showMsg("error", "Upload failed."); }
+    setUploading(false);
+  };
+
+  const del = async (e, id) => {
+    e.stopPropagation();
+    if (!confirm("Delete this batch and all its results?")) return;
+    try {
+      await fetch(`/api/verify/batches/${id}`, { method:"DELETE", headers: authHeader });
+      showMsg("success", "Batch deleted."); load();
+    } catch {}
+  };
+
+  return (
+    <div style={{ flex:1, padding:"28px 32px", overflowY:"auto" }}>
+      <Toast msg={msg}/>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:24 }}>
+        <div>
+          <div style={{ fontWeight:800, fontSize:22, letterSpacing:"-0.5px" }}>Email Verifier</div>
+          <div style={{ color:"var(--text3)", fontSize:13, marginTop:3 }}>Upload a spreadsheet — every email is checked for valid format and a working mail domain before you send.</div>
+        </div>
+        <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display:"none" }}
+          onChange={e => { handleUpload(e.target.files[0]); e.target.value=""; }}/>
+        <button onClick={() => fileRef.current?.click()} disabled={uploading} style={{ ...S.btnPrimary, opacity:uploading?0.6:1 }}>
+          {uploading ? <><Loader2 size={15} style={{ animation:"spin 1s linear infinite" }}/> Uploading...</> : <><Upload size={15}/> Upload List to Verify</>}
+        </button>
+      </div>
+
+      <div style={{ ...S.card, marginBottom:20, display:"flex", gap:20, fontSize:12, color:"var(--text3)", lineHeight:1.6 }}>
+        <ShieldCheck size={28} color="var(--accent)" style={{ flexShrink:0 }}/>
+        <div>
+          Each address is checked for correct syntax and a live mail server (MX/DNS lookup) on its domain, plus flags for disposable and role-based
+          addresses (info@, admin@, etc). This catches typos, dead domains, and junk addresses before you send — it isn't a guarantee that a specific
+          inbox is currently active, since most mail providers don't allow that to be checked remotely.
+        </div>
+      </div>
+
+      {loading && <div style={{ color:"var(--text3)", fontSize:13 }}>Loading...</div>}
+      {!loading && batches.length === 0 && (
+        <div style={{ textAlign:"center", padding:"60px 0", color:"var(--text3)" }}>
+          <ShieldCheck size={40} style={{ opacity:0.3, display:"block", margin:"0 auto 12px" }}/>
+          <div style={{ fontSize:15, fontWeight:600, marginBottom:6 }}>No verification batches yet</div>
+          <div style={{ fontSize:13 }}>Upload an Excel or CSV file of email addresses to get started.</div>
+        </div>
+      )}
+
+      <div style={{ display:"grid", gap:12 }}>
+        {batches.map(b => {
+          const s = CAMP_STATUS[b.status] || {};
+          return (
+            <div key={b.id} onClick={() => navigate(`/email-verifier/${b.id}`)}
+              style={{ padding:"16px 20px", background:"var(--surface)", border:"1px solid var(--border)", borderRadius:"var(--radius-lg)", cursor:"pointer", transition:"border-color 0.15s" }}
+              onMouseEnter={e => e.currentTarget.style.borderColor="var(--border2)"}
+              onMouseLeave={e => e.currentTarget.style.borderColor="var(--border)"}>
+              <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:12 }}>
+                <div style={{ fontWeight:700, fontSize:15, flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{b.name || `Batch #${b.id}`}</div>
+                <StatusBadge status={b.status}/>
+                <span style={{ fontSize:11, color:"var(--text3)", fontFamily:"var(--font-mono)" }}>{new Date(b.created_at).toLocaleString()}</span>
+                <button onClick={e => del(e, b.id)} style={{ ...S.btnSecondary, fontSize:12, padding:"6px 10px" }}
+                  onMouseEnter={e => { e.currentTarget.style.borderColor="var(--red)"; e.currentTarget.style.color="var(--red)"; }}
+                  onMouseLeave={e => { e.currentTarget.style.borderColor="var(--border2)"; e.currentTarget.style.color="var(--text2)"; }}>
+                  <Trash2 size={13}/>
+                </button>
+              </div>
+              <VerifyProgressBar batch={b}/>
+              <div style={{ display:"flex", alignItems:"center", gap:14, marginTop:10, flexWrap:"wrap" }}>
+                <span style={{ fontSize:12, color:"var(--green)", fontFamily:"var(--font-mono)" }}>✓ {b.valid_count} verified</span>
+                <span style={{ fontSize:12, color:"var(--amber)", fontFamily:"var(--font-mono)" }}>? {b.risky_count} risky</span>
+                <span style={{ fontSize:12, color:"var(--red)", fontFamily:"var(--font-mono)" }}>✗ {b.invalid_count} not verified</span>
+                <span style={{ fontSize:12, color:"var(--text3)", fontFamily:"var(--font-mono)" }}>⧉ {b.duplicate_count} duplicate</span>
+                <span style={{ fontSize:12, color:"var(--text3)", fontFamily:"var(--font-mono)" }}>{b.total} total</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function EmailVerifierDetailPage({ authHeader }) {
+  const { id }   = useParams();
+  const navigate = useNavigate();
+  const [batch,   setBatch]   = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error,   setError]   = useState("");
+  const [msg,     setMsg]     = useState(null);
+  const [cat,     setCat]     = useState("all");
+  const [results, setResults] = useState([]);
+  const [offset,  setOffset]  = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [resLoading, setResLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [sendingToCompose, setSendingToCompose] = useState(false);
+  const PAGE = 100;
+
+  const showMsg = (type, text) => { setMsg({ type, text }); setTimeout(() => setMsg(null), 3000); };
+
+  const loadBatch = async () => {
+    try {
+      const res  = await fetch(`/api/verify/batches/${id}`, { headers: authHeader });
+      const data = await res.json();
+      if (data.ok) setBatch(data.batch); else setError(data.message || "Not found.");
+    } catch { setError("Failed to load."); }
+    setLoading(false);
+  };
+
+  const loadResults = async (newCat, newOffset) => {
+    setResLoading(true);
+    try {
+      const qs = new URLSearchParams({ status:newCat, limit:PAGE, offset:newOffset });
+      const res  = await fetch(`/api/verify/batches/${id}/results?${qs}`, { headers: authHeader });
+      const data = await res.json();
+      if (data.ok) {
+        setResults(prev => newOffset === 0 ? data.results : [...prev, ...data.results]);
+        setHasMore(data.results.length === PAGE);
+      }
+    } catch {}
+    setResLoading(false);
+  };
+
+  useEffect(() => { loadBatch(); const t = setInterval(loadBatch, 2500); return () => clearInterval(t); }, [id]);
+  useEffect(() => { setOffset(0); loadResults(cat, 0); }, [cat, id]);
+
+  const action = async (verb) => {
+    try {
+      const res  = await fetch(`/api/verify/batches/${id}/${verb}`, { method:"POST", headers: authHeader });
+      const data = await res.json();
+      showMsg(data.ok ? "success" : "error", data.message);
+      loadBatch();
+    } catch { showMsg("error", "Action failed."); }
+  };
+
+  const loadMore = () => { const next = offset + PAGE; setOffset(next); loadResults(cat, next); };
+
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const res = await fetch(`/api/verify/batches/${id}/export?status=${cat}`, { headers: authHeader });
+      if (!res.ok) { showMsg("error", "Export failed."); setExporting(false); return; }
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement("a");
+      a.href = url;
+      a.download = `${(batch?.name || "verified-emails").replace(/[^a-zA-Z0-9._-]+/g, "_")}_${cat}.xlsx`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    } catch { showMsg("error", "Export failed."); }
+    setExporting(false);
+  };
+
+  // Pulls every "valid" address (paging past the 500-per-request server cap)
+  // and hands them to Compose, so only addresses that are safe to send to go through.
+  const sendVerifiedToCompose = async () => {
+    setSendingToCompose(true);
+    try {
+      let all = [], off = 0;
+      while (true) {
+        const qs = new URLSearchParams({ status:"valid", limit:500, offset:off });
+        const res  = await fetch(`/api/verify/batches/${id}/results?${qs}`, { headers: authHeader });
+        const data = await res.json();
+        if (!data.ok || data.results.length === 0) break;
+        all = all.concat(data.results.map(r => r.email));
+        if (data.results.length < 500) break;
+        off += 500;
+      }
+      if (all.length === 0) { showMsg("error", "No verified emails to send to yet."); setSendingToCompose(false); return; }
+      navigate("/compose", { state: { prefilledTo: all.join("\n") } });
+    } catch { showMsg("error", "Failed to load verified emails."); }
+    setSendingToCompose(false);
+  };
+
+  const s = batch ? (CAMP_STATUS[batch.status] || {}) : {};
+  const active = batch && (batch.status === "running" || batch.status === "paused");
+
+  return (
+    <div style={{ flex:1, padding:"28px 32px", overflowY:"auto" }}>
+      <Toast msg={msg}/>
+      <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:24 }}>
+        <button onClick={() => navigate("/email-verifier")} style={{ ...S.btnSecondary, width:"fit-content" }}><ArrowLeft size={13}/> Back</button>
+        <div style={{ fontWeight:800, fontSize:22, letterSpacing:"-0.5px", flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+          {batch ? (batch.name || `Batch #${batch.id}`) : "Verification Batch"}
+        </div>
+        {batch && <StatusBadge status={batch.status}/>}
+      </div>
+
+      {loading && !batch && <div style={{ color:"var(--text3)", fontSize:13 }}>Loading...</div>}
+      {error && !batch && <div style={{ color:"var(--red)", fontSize:13 }}>{error}</div>}
+
+      {batch && (
+        <>
+          <div style={{ ...S.card, marginBottom:20 }}>
+            <VerifyProgressBar batch={batch}/>
+            <div style={{ display:"flex", gap:10, marginTop:16, flexWrap:"wrap" }}>
+              {batch.status === "running" && <button onClick={() => action("pause")}  style={{ ...S.btnSecondary }}>⏸ Pause</button>}
+              {batch.status === "paused"  && <button onClick={() => action("resume")} style={{ ...S.btnPrimary }}>▶ Resume</button>}
+              {active && <button onClick={() => action("stop")} style={{ ...S.btnSecondary, borderColor:"var(--red)", color:"var(--red)" }}>⏹ Stop</button>}
+              <div style={{ flex:1 }}/>
+              <button onClick={sendVerifiedToCompose} disabled={sendingToCompose || batch.valid_count===0}
+                style={{ ...S.btnPrimary, opacity:(sendingToCompose||batch.valid_count===0)?0.5:1 }}>
+                {sendingToCompose ? <><Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> Loading...</> : <><Send size={14}/> Send Verified to Compose</>}
+              </button>
+              {active && <span style={{ fontSize:12, color:"var(--text3)", alignSelf:"center" }}>Auto-refreshing — safe to close the browser.</span>}
+            </div>
+          </div>
+
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(5, 1fr)", gap:14, marginBottom:24 }}>
+            <StatCard icon={<ListChecks size={20} color="var(--accent)"/>}  label="Total"        value={batch.total}          color="#00e5ff"/>
+            <StatCard icon={<MailCheck size={20} color="var(--green)"/>}    label="Verified"     value={batch.valid_count}    color="#00ff87"/>
+            <StatCard icon={<MailQuestion size={20} color="var(--amber)"/>} label="Risky"         value={batch.risky_count}    color="#ffb703"/>
+            <StatCard icon={<MailX size={20} color="var(--red)"/>}          label="Not Verified"  value={batch.invalid_count}  color="#ff4d6d"/>
+            <StatCard icon={<Copy size={20} color="var(--text3)"/>}         label="Duplicate"     value={batch.duplicate_count} color="#8a94a6"/>
+          </div>
+
+          <div style={{ ...S.card, padding:0, overflow:"hidden" }}>
+            <div style={{ padding:"14px 20px", borderBottom:"1px solid var(--border)", display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+              {[["all","All"], ["valid","Verified"], ["risky","Risky"], ["invalid","Not Verified"], ["duplicate","Duplicate"]].map(([key,label]) => (
+                <button key={key} onClick={() => setCat(key)}
+                  style={{ ...S.btnSecondary, padding:"6px 14px", fontSize:12,
+                    background: cat===key ? (VERIFY_CATS[key]?.dim || "var(--accent-dim)") : "transparent",
+                    color: cat===key ? (VERIFY_CATS[key]?.color || "var(--accent)") : "var(--text3)",
+                    borderColor: cat===key ? (VERIFY_CATS[key]?.color || "var(--accent)") : "var(--border2)" }}>
+                  {label}
+                </button>
+              ))}
+              <div style={{ flex:1 }}/>
+              <button onClick={handleExport} disabled={exporting || results.length===0} style={{ ...S.btnSecondary, fontSize:12, padding:"7px 14px", opacity:(exporting||results.length===0)?0.5:1 }}>
+                {exporting ? <><Loader2 size={13} style={{ animation:"spin 1s linear infinite" }}/> Exporting...</> : <><Download size={13}/> Export {cat==="all"?"All":VERIFY_CATS[cat]?.label}</>}
+              </button>
+            </div>
+            {results.length === 0 && !resLoading && <div style={{ padding:"40px 20px", textAlign:"center", color:"var(--text3)", fontSize:13 }}>No results in this category yet.</div>}
+            <div style={{ maxHeight:460, overflowY:"auto", fontFamily:"var(--font-mono)", fontSize:12 }}>
+              {results.map(r => {
+                const c = VERIFY_CATS[r.status];
+                return (
+                  <div key={r.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"9px 20px", borderBottom:"1px solid var(--border)" }}>
+                    {c && <span style={{ ...S.chip, background:c.dim, color:c.color, fontWeight:700, flexShrink:0 }}>{c.icon}{c.label}</span>}
+                    {!c && <span style={{ ...S.chip, background:"var(--surface2)", color:"var(--text3)", flexShrink:0 }}>Pending</span>}
+                    <span style={{ flex:1, minWidth:0, color:"var(--text2)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{r.email}</span>
+                    {r.reason && <span style={{ color:"var(--text3)", flexShrink:0, maxWidth:280, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={r.reason}>{r.reason}</span>}
+                  </div>
+                );
+              })}
+            </div>
+            {hasMore && (
+              <div style={{ padding:"12px 20px", borderTop:"1px solid var(--border)", textAlign:"center" }}>
+                <button onClick={loadMore} disabled={resLoading} style={{ ...S.btnSecondary, fontSize:12, padding:"7px 16px" }}>
+                  {resLoading ? "Loading..." : "Load more"}
+                </button>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 function MainApp({ user, token, onLogout }) {
   const authHeader = { "Authorization": `Bearer ${token}` };
@@ -2258,6 +2575,7 @@ function MainApp({ user, token, onLogout }) {
     { to:"/attachment-groups",label:"Attachment Groups", icon:<Paperclip size={13}/> },
     { to:"/sender-groups",    label:"Sender Groups",     icon:<AtSign size={13}/> },
     { to:"/recipient-groups", label:"Recipient Groups",  icon:<Users size={13}/> },
+    { to:"/email-verifier",   label:"Email Verifier",    icon:<ShieldCheck size={13}/> },
     { to:"/tracking",         label:"Tracking",          icon:<Activity size={13}/> },
   ];
 
@@ -2304,6 +2622,8 @@ function MainApp({ user, token, onLogout }) {
         <Route path="/attachment-groups" element={<AttachmentGroupsPage authHeader={authHeader}/>}/>
         <Route path="/sender-groups"    element={<SenderGroupsPage authHeader={authHeader}/>}/>
         <Route path="/recipient-groups" element={<RecipientGroupsPage authHeader={authHeader}/>}/>
+        <Route path="/email-verifier"   element={<EmailVerifierPage authHeader={authHeader}/>}/>
+        <Route path="/email-verifier/:id" element={<EmailVerifierDetailPage authHeader={authHeader}/>}/>
         <Route path="/tracking"         element={<TrackingPage authHeader={authHeader}/>}/>
         <Route path="/tracking/:id"     element={<TrackingDetailPage authHeader={authHeader}/>}/>
         <Route path="*"                 element={<Navigate to="/compose" replace/>}/>
