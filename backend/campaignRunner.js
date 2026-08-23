@@ -62,7 +62,7 @@ async function runLoop(campaignId) {
   // Preload the sender pool (single SMTP or a sender group).
   let senderAccounts = null;
   if (c.sender_group_id) {
-    const r = await pool.query("SELECT * FROM sender_accounts WHERE group_id=$1", [c.sender_group_id]);
+    const r = await pool.query("SELECT * FROM sender_accounts WHERE group_id=$1 ORDER BY id ASC", [c.sender_group_id]);
     if (r.rows.length === 0) return fail(campaignId, "Sender group has no accounts.");
     senderAccounts = r.rows;
   }
@@ -126,8 +126,11 @@ async function runLoop(campaignId) {
     }
 
     // Resolve sender, subject, body for this recipient.
+    // Sender Group cycles through its accounts in a fixed round-robin order
+    // (sender1 → sender2 → sender3 → sender1 → ...), not randomly — everything
+    // else (subject/body/attachment groups) stays random as before.
     const sender = senderAccounts
-      ? pickRandom(senderAccounts)
+      ? senderAccounts[processed % senderAccounts.length]
       : { host: c.smtp_host, port: c.smtp_port, username: c.smtp_user, password: c.smtp_pass, from_name: c.from_name };
 
     const emailSubject = subjectItems ? pickRandom(subjectItems).subject : (c.subject || "");
