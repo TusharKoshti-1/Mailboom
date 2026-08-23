@@ -15,6 +15,7 @@ A professional email campaign tool with unlimited sending, random subject/body r
 - **Real-time log console** — live delivery status with per-email results
 - **Configurable delay** — set seconds between emails to avoid throttling
 - **Connection test** — verify SMTP before sending
+- **Email Verifier** — upload a spreadsheet of addresses and get them sorted into Verified / Risky / Not Verified / Duplicate before you send
 
 ---
 
@@ -129,6 +130,64 @@ mailblast-pro/
 
 ---
 
+## Email Verifier
+
+Upload an `.xlsx`, `.xls`, or `.csv` file on the **Email Verifier** page. Every email address found anywhere in the
+sheet is checked in the background (safe to close the browser) and sorted into:
+
+| Category | Meaning |
+|---|---|
+| **Verified** | Correct format and the domain has a working mail server (MX/DNS lookup) |
+| **Risky** | Deliverable, but a disposable/temporary domain or a role address (`info@`, `admin@`, ...) |
+| **Not Verified** | Bad format, or the domain has no mail server / doesn't exist |
+| **Duplicate** | Same address appeared more than once in the uploaded file |
+
+Note this is a syntax + domain-level check, not a live SMTP mailbox probe (most mail providers block that check
+anyway) — so it reliably catches typos and dead domains, but "Verified" isn't an absolute guarantee a specific
+inbox is active right now.
+
+From a batch's detail page you can filter by category, export any category (or all) back out as `.xlsx`, or send
+the Verified addresses straight to Compose.
+
+### Deep SMTP Check (optional, per batch)
+
+Once basic verification finishes, you can run an additional pass that opens a real connection to each domain's
+mail server and asks `RCPT TO:<address>` — the same question a real delivery attempt asks — **without ever sending
+`DATA`**, so no email actually goes out during the check. This is how paid verification services (ZeroBounce,
+NeverBounce, etc.) get closer to "does this exact mailbox exist" than a domain-level check alone.
+
+Results per address: `deliverable`, `undeliverable` (mail server explicitly rejected it), or `unknown` (catch-all
+domain, greylisting, or the probe couldn't get an answer).
+
+**Read this before turning it on:**
+- **It needs outbound port 25.** Most cloud/VPS hosts (AWS, GCP, DigitalOcean, Render, Railway, Heroku...) block
+  it by default to fight spam. If yours does, every result will come back `unknown` — that's expected, not a bug.
+  Check with your host if you want this working; some require a support ticket to open port 25 outbound.
+- **Catch-all domains can't be trusted per-mailbox.** Some mail servers accept `RCPT TO` for any address and only
+  decide later whether it's real. The check detects this (by probing a random fake address on the same domain
+  first) and reports `unknown` rather than a false "deliverable".
+- **Be a polite sender.** Connections are grouped and reused per domain and capped at 3 concurrent domains at a
+  time — hammering someone's mail server with rapid probes can get your server's IP flagged or blocked.
+- Optional env vars: `SMTP_PROBE_FROM` (the address used in `MAIL FROM`, default `postmaster@verify.local`) and
+  `SMTP_PROBE_HELO` (the HELO/EHLO hostname, default `verify.local`).
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/verify/batches/:id/deep-check/start` | Start deep-checking every unchecked Verified address |
+| `POST` | `/api/verify/batches/:id/deep-check/pause` \| `resume` \| `stop` | Control an in-progress deep check |
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/verify/upload` | Upload a file and start verifying it |
+| `GET`  | `/api/verify/batches` | List your verification batches |
+| `GET`  | `/api/verify/batches/:id` | Batch status + counts |
+| `GET`  | `/api/verify/batches/:id/results?status=` | Paginated results (`all`\|`valid`\|`risky`\|`invalid`\|`duplicate`) |
+| `GET`  | `/api/verify/batches/:id/export?status=` | Export a category as `.xlsx` |
+| `POST` | `/api/verify/batches/:id/pause` \| `resume` \| `stop` | Control an in-progress batch |
+| `DELETE` | `/api/verify/batches/:id` | Delete a batch |
+
+---
+
 ## API Endpoints
 
 | Method | Path | Description |
@@ -145,3 +204,4 @@ MIT — use freely for legitimate email marketing with proper consent.
 
 seov mbgy aorw ecor
 
+ccyu pnrz nnvv tweh

@@ -232,6 +232,23 @@ async function initDB() {
 
     CREATE INDEX IF NOT EXISTS idx_verify_batches_user ON verify_batches(user_id);
     CREATE INDEX IF NOT EXISTS idx_verify_results_batch ON verify_results(batch_id, status);
+
+    -- Deep Check: an optional second pass that opens a real SMTP connection to
+    -- each domain and asks "RCPT TO:<address>" directly, instead of only
+    -- checking that the domain has a mail server. Only ever run against rows
+    -- already marked 'valid'. smtp_status: unchecked | deliverable | undeliverable | unknown
+    -- ('unknown' covers catch-all domains, greylisting, timeouts, and hosts
+    -- that block outbound port 25 — this is a best-effort signal, not proof).
+    ALTER TABLE verify_results ADD COLUMN IF NOT EXISTS smtp_status VARCHAR(20) DEFAULT 'unchecked';
+    ALTER TABLE verify_results ADD COLUMN IF NOT EXISTS smtp_reason VARCHAR(200);
+
+    -- deep_status: idle | running | paused | completed | stopped
+    ALTER TABLE verify_batches ADD COLUMN IF NOT EXISTS deep_status VARCHAR(20) DEFAULT 'idle';
+    ALTER TABLE verify_batches ADD COLUMN IF NOT EXISTS deep_total INTEGER DEFAULT 0;
+    ALTER TABLE verify_batches ADD COLUMN IF NOT EXISTS deep_checked INTEGER DEFAULT 0;
+    ALTER TABLE verify_batches ADD COLUMN IF NOT EXISTS deep_deliverable INTEGER DEFAULT 0;
+    ALTER TABLE verify_batches ADD COLUMN IF NOT EXISTS deep_undeliverable INTEGER DEFAULT 0;
+    ALTER TABLE verify_batches ADD COLUMN IF NOT EXISTS deep_unknown INTEGER DEFAULT 0;
   `);
   console.log("✅ Database tables ready");
 }

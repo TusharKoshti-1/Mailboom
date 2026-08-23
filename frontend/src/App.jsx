@@ -6,7 +6,7 @@ import {
   Clock, Users, LogOut, User, Save, Plus, Trash2, ChevronRight,
   ArrowLeft, FolderOpen, UserPlus, AtSign, CheckCircle, FileText, Edit2, Type,
   Activity, BarChart3, MailOpen, Download,
-  ShieldCheck, MailCheck, MailX, MailQuestion, Copy, ListChecks,
+  ShieldCheck, MailCheck, MailX, MailQuestion, Copy, ListChecks, ShieldQuestion,
 } from "lucide-react";
 
 const onFocus = e => e.target.style.borderColor = "var(--accent)";
@@ -2385,6 +2385,108 @@ function EmailVerifierPage({ authHeader }) {
   );
 }
 
+const DEEP_STATUS_META = {
+  idle:      { color:"var(--text3)", dim:"var(--surface2)",  label:"Not started" },
+  running:   { color:"var(--accent)", dim:"var(--accent-dim)", label:"Running" },
+  paused:    { color:"var(--amber)",  dim:"var(--amber-dim)",  label:"Paused" },
+  completed: { color:"var(--green)",  dim:"var(--green-dim)",  label:"Completed" },
+  stopped:   { color:"var(--red)",    dim:"var(--red-dim)",    label:"Stopped" },
+};
+
+const SMTP_STATUS_META = {
+  deliverable:   { color:"var(--green)", dim:"var(--green-dim)", label:"Deliverable" },
+  undeliverable: { color:"var(--red)",   dim:"var(--red-dim)",   label:"Rejected" },
+  unknown:       { color:"var(--amber)", dim:"var(--amber-dim)", label:"Unknown" },
+  unchecked:     { color:"var(--text3)", dim:"var(--surface2)",  label:"Not checked" },
+};
+
+function DeepCheckPanel({ batch, authHeader, onChange }) {
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const showMsg = (type, text) => { setMsg({ type, text }); setTimeout(() => setMsg(null), 4000); };
+
+  const deepAction = async (verb) => {
+    setBusy(true);
+    try {
+      const res  = await fetch(`/api/verify/batches/${batch.id}/deep-check/${verb}`, { method:"POST", headers: authHeader });
+      const data = await res.json();
+      showMsg(data.ok ? "success" : "error", data.message);
+      onChange();
+    } catch { showMsg("error", "Action failed."); }
+    setBusy(false);
+  };
+
+  if (batch.status !== "completed") {
+    return (
+      <div style={{ ...S.card, marginBottom:20, display:"flex", gap:14, alignItems:"center" }}>
+        <ShieldQuestion size={22} color="var(--text3)" style={{ flexShrink:0 }}/>
+        <div style={{ fontSize:12, color:"var(--text3)" }}>Deep SMTP check unlocks once the basic verification above finishes.</div>
+      </div>
+    );
+  }
+
+  const d = DEEP_STATUS_META[batch.deep_status] || DEEP_STATUS_META.idle;
+  const total = batch.deep_total || 0;
+  const pct = total > 0 ? Math.round((batch.deep_checked / total) * 100) : 0;
+  const remainingToStart = batch.valid_count - (batch.deep_total || 0) + (batch.deep_status === "completed" ? 0 : 0);
+  const unknownRatio = batch.deep_checked > 0 ? batch.deep_unknown / batch.deep_checked : 0;
+  const active = batch.deep_status === "running" || batch.deep_status === "paused";
+
+  return (
+    <div style={{ ...S.card, marginBottom:20 }}>
+      {msg && <div style={{ fontSize:12, color: msg.type==="error"?"var(--red)":"var(--green)", marginBottom:10 }}>{msg.text}</div>}
+      <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:10 }}>
+        <ShieldCheck size={16} color="var(--accent)"/>
+        <span style={{ fontWeight:700, fontSize:14 }}>Deep SMTP Check</span>
+        <span style={{ ...S.chip, background:d.dim, color:d.color, fontWeight:700 }}>
+          {batch.deep_status==="running" && <Loader2 size={11} style={{ animation:"spin 1s linear infinite" }}/>}{d.label}
+        </span>
+        <div style={{ flex:1 }}/>
+        {(batch.deep_status === "idle" || batch.deep_status === "stopped" || batch.deep_status === "completed") && (
+          <button onClick={() => deepAction("start")} disabled={busy} style={{ ...S.btnPrimary, padding:"7px 16px", fontSize:12 }}>
+            <Send size={12}/> {batch.deep_status === "idle" ? "Start Deep Check" : "Check Remaining"}
+          </button>
+        )}
+        {batch.deep_status === "running" && <button onClick={() => deepAction("pause")} disabled={busy} style={{ ...S.btnSecondary, padding:"7px 16px", fontSize:12 }}>⏸ Pause</button>}
+        {batch.deep_status === "paused"  && <button onClick={() => deepAction("resume")} disabled={busy} style={{ ...S.btnPrimary, padding:"7px 16px", fontSize:12 }}>▶ Resume</button>}
+        {active && <button onClick={() => deepAction("stop")} disabled={busy} style={{ ...S.btnSecondary, padding:"7px 16px", fontSize:12, borderColor:"var(--red)", color:"var(--red)" }}>⏹ Stop</button>}
+      </div>
+
+      <div style={{ fontSize:11, color:"var(--text3)", lineHeight:1.6, marginBottom:12 }}>
+        Opens a real connection to each domain's mail server and asks whether it would accept mail for that exact
+        address (no email is actually sent). This only runs against addresses already marked <strong>Verified</strong> above.
+        It needs outbound port 25, which most cloud hosts block by default — if every result below comes back
+        "Unknown", that's what's happening, not a bug.
+      </div>
+
+      {total > 0 && (
+        <>
+          <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:"var(--text3)", fontFamily:"var(--font-mono)", marginBottom:5 }}>
+            <span>{batch.deep_checked} / {total} checked</span><span>{pct}%</span>
+          </div>
+          <div style={{ height:6, background:"var(--border)", borderRadius:3, overflow:"hidden", display:"flex", marginBottom:14 }}>
+            <div style={{ height:"100%", background:"var(--green)", width:`${total>0?(batch.deep_deliverable/total)*100:0}%` }}/>
+            <div style={{ height:"100%", background:"var(--red)",   width:`${total>0?(batch.deep_undeliverable/total)*100:0}%` }}/>
+            <div style={{ height:"100%", background:"var(--amber)", width:`${total>0?(batch.deep_unknown/total)*100:0}%` }}/>
+          </div>
+          <div style={{ display:"flex", gap:16, fontSize:12, flexWrap:"wrap" }}>
+            <span style={{ color:"var(--green)", fontFamily:"var(--font-mono)" }}>✓ {batch.deep_deliverable} deliverable</span>
+            <span style={{ color:"var(--red)", fontFamily:"var(--font-mono)" }}>✗ {batch.deep_undeliverable} rejected</span>
+            <span style={{ color:"var(--amber)", fontFamily:"var(--font-mono)" }}>? {batch.deep_unknown} unknown</span>
+          </div>
+          {batch.deep_checked >= 20 && unknownRatio > 0.8 && (
+            <div style={{ marginTop:12, padding:"10px 14px", background:"var(--amber-dim)", border:"1px solid var(--amber)", borderRadius:"var(--radius)", fontSize:12, color:"var(--amber)" }}>
+              Almost every probe is coming back "Unknown" — this usually means outbound port 25 is blocked on this
+              server (common on Render, AWS, DigitalOcean, etc). Deep check can't do much here; the domain-level
+              Verified/Risky/Not Verified result above is still your best signal.
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 function EmailVerifierDetailPage({ authHeader }) {
   const { id }   = useParams();
   const navigate = useNavigate();
@@ -2511,6 +2613,8 @@ function EmailVerifierDetailPage({ authHeader }) {
             </div>
           </div>
 
+          <DeepCheckPanel batch={batch} authHeader={authHeader} onChange={loadBatch}/>
+
           <div style={{ display:"grid", gridTemplateColumns:"repeat(5, 1fr)", gap:14, marginBottom:24 }}>
             <StatCard icon={<ListChecks size={20} color="var(--accent)"/>}  label="Total"        value={batch.total}          color="#00e5ff"/>
             <StatCard icon={<MailCheck size={20} color="var(--green)"/>}    label="Verified"     value={batch.valid_count}    color="#00ff87"/>
@@ -2539,12 +2643,15 @@ function EmailVerifierDetailPage({ authHeader }) {
             <div style={{ maxHeight:460, overflowY:"auto", fontFamily:"var(--font-mono)", fontSize:12 }}>
               {results.map(r => {
                 const c = VERIFY_CATS[r.status];
+                const smtp = r.status === "valid" ? SMTP_STATUS_META[r.smtp_status || "unchecked"] : null;
                 return (
                   <div key={r.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"9px 20px", borderBottom:"1px solid var(--border)" }}>
                     {c && <span style={{ ...S.chip, background:c.dim, color:c.color, fontWeight:700, flexShrink:0 }}>{c.icon}{c.label}</span>}
                     {!c && <span style={{ ...S.chip, background:"var(--surface2)", color:"var(--text3)", flexShrink:0 }}>Pending</span>}
+                    {smtp && smtp.label !== "Not checked" && <span style={{ ...S.chip, background:smtp.dim, color:smtp.color, flexShrink:0 }}>{smtp.label}</span>}
                     <span style={{ flex:1, minWidth:0, color:"var(--text2)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{r.email}</span>
-                    {r.reason && <span style={{ color:"var(--text3)", flexShrink:0, maxWidth:280, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={r.reason}>{r.reason}</span>}
+                    {r.smtp_reason && <span style={{ color:"var(--text3)", flexShrink:0, maxWidth:220, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={r.smtp_reason}>{r.smtp_reason}</span>}
+                    {!r.smtp_reason && r.reason && <span style={{ color:"var(--text3)", flexShrink:0, maxWidth:280, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={r.reason}>{r.reason}</span>}
                   </div>
                 );
               })}

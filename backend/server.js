@@ -12,6 +12,7 @@ const XLSX       = require("xlsx");
 const { pool, initDB } = require("./db");
 const campaignRunner   = require("./campaignRunner");
 const emailVerifier    = require("./emailVerifier");
+const deepVerifier     = require("./deepVerifier");
 
 // Where campaign attachments are persisted so the background worker can read
 // them after the request that created the campaign is long gone.
@@ -1123,6 +1124,7 @@ app.get("/api/verify/batches/:id/results", authMiddleware, async (req, res) => {
     if (b.rows.length === 0) return res.json({ ok: false, message: "Batch not found." });
 
     const status = String(req.query.status || "all").toLowerCase();
+    const smtp   = String(req.query.smtp || "all").toLowerCase();
     const limit  = Math.min(parseInt(req.query.limit, 10) || 100, 500);
     const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
 
@@ -1132,9 +1134,13 @@ app.get("/api/verify/batches/:id/results", authMiddleware, async (req, res) => {
       params.push(status);
       where += ` AND status=$${params.length}`;
     }
+    if (["deliverable", "undeliverable", "unknown", "unchecked"].includes(smtp)) {
+      params.push(smtp);
+      where += ` AND smtp_status=$${params.length}`;
+    }
     params.push(limit, offset);
     const r = await pool.query(
-      `SELECT id, email, status, reason, checked_at FROM verify_results WHERE ${where}
+      `SELECT id, email, status, reason, smtp_status, smtp_reason, checked_at FROM verify_results WHERE ${where}
        ORDER BY idx ASC, id ASC LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
     );
@@ -1151,20 +1157,25 @@ app.get("/api/verify/batches/:id/export", authMiddleware, async (req, res) => {
     if (b.rows.length === 0) return res.status(404).json({ ok: false, message: "Batch not found." });
 
     const status = String(req.query.status || "all").toLowerCase();
+    const smtp   = String(req.query.smtp || "all").toLowerCase();
     const params = [req.params.id];
     let where = "batch_id=$1";
     if (["valid", "invalid", "risky", "duplicate", "pending"].includes(status)) {
       params.push(status);
       where += ` AND status=$${params.length}`;
     }
+    if (["deliverable", "undeliverable", "unknown", "unchecked"].includes(smtp)) {
+      params.push(smtp);
+      where += ` AND smtp_status=$${params.length}`;
+    }
     const r = await pool.query(
-      `SELECT email, status, reason FROM verify_results WHERE ${where} ORDER BY idx ASC, id ASC`,
+      `SELECT email, status, reason, smtp_status, smtp_reason FROM verify_results WHERE ${where} ORDER BY idx ASC, id ASC`,
       params
     );
 
-    const aoa = [["Email", "Category", "Reason"], ...r.rows.map(row => [row.email, row.status, row.reason || ""])];
+    const aoa = [["Email", "Category", "Reason", "SMTP Check", "SMTP Detail"], ...r.rows.map(row => [row.email, row.status, row.reason || "", row.smtp_status || "unchecked", row.smtp_reason || ""])];
     const ws  = XLSX.utils.aoa_to_sheet(aoa);
-    ws["!cols"] = [{ wch: 38 }, { wch: 12 }, { wch: 48 }];
+    ws["!cols"] = [{ wch: 38 }, { wch: 12 }, { wch: 40 }, { wch: 14 }, { wch: 40 }];
     const wb  = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Emails");
     const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
@@ -1218,8 +1229,69 @@ app.delete("/api/verify/batches/:id", authMiddleware, async (req, res) => {
     const owned = await pool.query("SELECT id FROM verify_batches WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
     if (owned.rows.length === 0) return res.json({ ok: false, message: "Batch not found." });
     emailVerifier.signalStop(req.params.id);
+    deepVerifier.signalStop(req.params.id);
     await pool.query("DELETE FROM verify_batches WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
     res.json({ ok: true, message: "Batch deleted." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── EMAIL VERIFIER: Deep (SMTP RCPT TO) Check ─────────────────────────────────
+// Opt-in second pass over every row already marked 'valid'. Requires outbound
+// port 25 to actually be reachable from this server — see smtpProbe.js.
+app.post("/api/verify/batches/:id/deep-check/start", authMiddleware, async (req, res) => {
+  try {
+    const b = await pool.query("SELECT * FROM verify_batches WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    if (b.rows.length === 0) return res.json({ ok: false, message: "Batch not found." });
+    if (b.rows[0].status !== "completed") return res.json({ ok: false, message: "Wait for the basic verification to finish first." });
+
+    const totalRes = await pool.query(
+      "SELECT COUNT(*) FROM verify_results WHERE batch_id=$1 AND status='valid' AND smtp_status='unchecked'",
+      [req.params.id]
+    );
+    const remaining = parseInt(totalRes.rows[0].count, 10);
+    if (remaining === 0) return res.json({ ok: false, message: "No unchecked verified addresses left to deep-check." });
+
+    await pool.query(
+      "UPDATE verify_batches SET deep_status='running', deep_total = deep_total + $1 WHERE id=$2",
+      [remaining, req.params.id]
+    );
+    deepVerifier.startDeepCheck(req.params.id);
+    res.json({ ok: true, message: `Deep SMTP check started on ${remaining} address(es).` });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+app.post("/api/verify/batches/:id/deep-check/pause", authMiddleware, async (req, res) => {
+  try {
+    const r = await pool.query("UPDATE verify_batches SET deep_status='paused' WHERE id=$1 AND user_id=$2 AND deep_status='running' RETURNING id", [req.params.id, req.user.id]);
+    if (r.rows.length === 0) return res.json({ ok: false, message: "Deep check is not running." });
+    deepVerifier.signalPause(req.params.id);
+    res.json({ ok: true, message: "Deep check paused." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+app.post("/api/verify/batches/:id/deep-check/resume", authMiddleware, async (req, res) => {
+  try {
+    const r = await pool.query("UPDATE verify_batches SET deep_status='running' WHERE id=$1 AND user_id=$2 AND deep_status='paused' RETURNING id", [req.params.id, req.user.id]);
+    if (r.rows.length === 0) return res.json({ ok: false, message: "Deep check is not paused." });
+    deepVerifier.startDeepCheck(req.params.id);
+    res.json({ ok: true, message: "Deep check resumed." });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+app.post("/api/verify/batches/:id/deep-check/stop", authMiddleware, async (req, res) => {
+  try {
+    const r = await pool.query("UPDATE verify_batches SET deep_status='stopped' WHERE id=$1 AND user_id=$2 AND deep_status IN ('running','paused') RETURNING id", [req.params.id, req.user.id]);
+    if (r.rows.length === 0) return res.json({ ok: false, message: "Deep check is not active." });
+    deepVerifier.signalStop(req.params.id);
+    res.json({ ok: true, message: "Deep check stopped." });
   } catch (err) {
     res.json({ ok: false, message: err.message });
   }
@@ -1237,6 +1309,7 @@ initDB().then(() => {
   // Resume any campaigns / verification batches that were mid-run when the server last stopped.
   campaignRunner.resumeAll();
   emailVerifier.resumeAll();
+  deepVerifier.resumeAll();
 }).catch(err => {
   console.error("❌ Database connection failed:", err.message);
   process.exit(1);
