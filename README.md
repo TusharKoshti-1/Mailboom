@@ -198,6 +198,47 @@ domain, greylisting, or the probe couldn't get an answer).
 
 ---
 
+## v5 additions
+
+### Up to 50 subjects / bodies — plus Greetings & Signatures
+Subject, Body, **Greeting** and **Signature** groups each hold up to 50 items. Every email is assembled as
+`greeting → body → signature`, each picked at random from its group (or a single fixed text). `{{email}}` and
+`{{domain}}` are replaced per recipient in subject, greeting, body and signature.
+
+### Campaign report (.xlsx)
+Open a campaign → **Download Report**. Sheets: Summary, All Recipients, Bounced & Failed, By Domain, By Sender.
+
+### What "delivered" really means
+No sender can prove a message reached the Inbox rather than Spam. The report ranks the evidence it *does* have:
+
+| Status | Evidence |
+|---|---|
+| Delivered — opened | tracking pixel loaded (strongest proof) |
+| Likely delivered | server accepted it, sending mailbox was checked afterwards, no bounce notice |
+| Accepted — waiting | accepted, too soon to know (default wait 30 min, `BOUNCE_SETTLE_MINUTES`) |
+| Accepted — unchecked | accepted, but the sender mailbox can't be read, so a later bounce would be invisible |
+| Rejected / Bounced | refused during sending, or a bounce notice arrived later (reason + server message included) |
+| Not sent | connection / login / temporary error |
+
+Late bounces are found by logging into each **sending mailbox over IMAP (port 993)** every 90 s and reading
+"Undelivered Mail" notices, matched to the exact recipient through a per-email Message-ID. IMAP host is auto-derived
+(`smtp.hostinger.com` → `imap.hostinger.com`); override it on the Compose / Sender Group form. SendGrid / Mailgun / SES
+have no mailbox to read — those show "Accepted — unchecked". Enable IMAP on the mailbox if the provider requires it.
+
+### Auto-pause on bounces + alert email (Settings page)
+Pauses a campaign when **N (default 3) bounces in a row** happen for the same **recipient domain** and/or the same
+**sending account** (configurable). "In a row" is judged in send order per domain/account; a good email to that
+domain/account resets the count; login/network errors don't count. The user gets an alert email whose subject and
+text are editable in **Settings** (with a test button). Pressing Resume starts a fresh count.
+
+Optional env vars: `ALERT_SMTP_HOST/PORT/USER/PASS` (dedicated alert sender), `BOUNCE_SCAN_INTERVAL_SEC` (90),
+`BOUNCE_WATCH_HOURS` (72 — how long after a campaign ends its mailbox keeps being checked), `BOUNCE_SETTLE_MINUTES` (30).
+
+**Upgrading:** run `npm install --prefix backend` (adds `imapflow`, `mailparser`) and rebuild the frontend. Database
+changes apply automatically on start. The Node process must stay running for bounce checks to happen.
+
+---
+
 ## License
 
 MIT — use freely for legitimate email marketing with proper consent.

@@ -6,6 +6,8 @@
 const nodemailer = require("nodemailer");
 const crypto     = require("crypto");
 const { pool }   = require("./db");
+const { assembleMessage, renderTokens, classifySendError } = require("./mailUtils");
+const bounceGuard = require("./bounceGuard");
 
 // campaignId -> { stop: bool, pause: bool } — control flags for the active loop.
 const controls = new Map();
@@ -36,12 +38,27 @@ async function interruptibleDelay(seconds, campaignId) {
 // Begin (or resume) processing a campaign. Safe to call repeatedly.
 function startCampaign(campaignId) {
   campaignId = Number(campaignId);
-  if (active.has(campaignId)) return;
+  if (active.has(campaignId)) {
+    // Resume pressed while the previous loop is still winding down after a
+    // pause: just cancel the pause flag so that loop carries on.
+    const ctrl = controls.get(campaignId);
+    if (ctrl && ctrl.pause && !ctrl.stop) ctrl.pause = false;
+    return;
+  }
   active.add(campaignId);
   controls.set(campaignId, { stop: false, pause: false });
+  let crashed = false;
   runLoop(campaignId)
-    .catch(err => console.error(`Campaign ${campaignId} crashed:`, err.message))
-    .finally(() => { active.delete(campaignId); controls.delete(campaignId); });
+    .catch(err => { crashed = true; console.error(`Campaign ${campaignId} crashed:`, err.message); })
+    .finally(async () => {
+      active.delete(campaignId); controls.delete(campaignId);
+      // If it was resumed in the instant the old loop was exiting, pick it back up.
+      if (crashed) return;
+      try {
+        const r = await pool.query("SELECT status FROM campaigns WHERE id=$1", [campaignId]);
+        if (r.rows[0] && r.rows[0].status === "running") startCampaign(campaignId);
+      } catch {}
+    });
 }
 
 function signalPause(campaignId) {
@@ -78,6 +95,17 @@ async function runLoop(campaignId) {
     const r = await pool.query("SELECT * FROM body_items WHERE group_id=$1", [c.body_group_id]);
     if (r.rows.length === 0) return fail(campaignId, "Body group has no bodies.");
     bodyItems = r.rows;
+  }
+
+  // Optional greeting / signature pools (random pick per recipient).
+  let greetingItems = null, signatureItems = null;
+  if (c.greeting_group_id) {
+    const r = await pool.query("SELECT body, is_html FROM greeting_items WHERE group_id=$1", [c.greeting_group_id]);
+    if (r.rows.length > 0) greetingItems = r.rows;
+  }
+  if (c.signature_group_id) {
+    const r = await pool.query("SELECT body, is_html FROM signature_items WHERE group_id=$1", [c.signature_group_id]);
+    if (r.rows.length > 0) signatureItems = r.rows;
   }
 
   const attachments = Array.isArray(c.attachments) ? c.attachments : [];
@@ -133,22 +161,38 @@ async function runLoop(campaignId) {
       ? senderAccounts[processed % senderAccounts.length]
       : { host: c.smtp_host, port: c.smtp_port, username: c.smtp_user, password: c.smtp_pass, from_name: c.from_name };
 
-    const emailSubject = subjectItems ? pickRandom(subjectItems).subject : (c.subject || "");
+    const emailSubject = renderTokens(subjectItems ? pickRandom(subjectItems).subject : (c.subject || ""), r.email);
     let emailBody, emailIsHtml;
     if (bodyItems) { const b = pickRandom(bodyItems); emailBody = b.body; emailIsHtml = b.is_html; }
-    else           { emailBody = c.body || ""; emailIsHtml = c.is_html; }
+    else           { emailBody = c.body || "";        emailIsHtml = c.is_html; }
+
+    let greeting = null, signature = null;
+    if (greetingItems)    { const g = pickRandom(greetingItems);  greeting  = { text: g.body, isHtml: g.is_html }; }
+    else if (c.greeting)  { greeting  = { text: c.greeting,  isHtml: c.greeting_is_html }; }
+    if (signatureItems)   { const g = pickRandom(signatureItems); signature = { text: g.body, isHtml: g.is_html }; }
+    else if (c.signature) { signature = { text: c.signature, isHtml: c.signature_is_html }; }
+
+    // greeting → body → signature, with {{email}} / {{domain}} filled in.
+    const msg = assembleMessage([
+      greeting  && { text: renderTokens(greeting.text,  r.email), isHtml: greeting.isHtml },
+      { text: renderTokens(emailBody, r.email), isHtml: emailIsHtml },
+      signature && { text: renderTokens(signature.text, r.email), isHtml: signature.isHtml },
+    ]);
 
     const fromAddr = (sender.username || "").trim();
     const fromFull = sender.from_name ? `"${sender.from_name}" <${fromAddr}>` : fromAddr;
 
     const trackingId = crypto.randomUUID();
+    // Our own Message-ID: a bounce notice quotes the original message, so this
+    // id lets the bounce scanner match the notice to exactly this recipient.
+    const senderDomain = fromAddr.includes("@") ? fromAddr.split("@").pop() : "localhost";
+    const messageId = `<${trackingId}@${senderDomain}>`;
     const pixel = `<img src="${c.base_url}/api/track/open/${trackingId}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden" />`;
-    const htmlBody = (emailIsHtml ? emailBody : emailBody.replace(/\n/g, "<br>")) + pixel;
 
     const mailOptions = {
-      from: fromFull, to: r.email, subject: emailSubject,
-      text: emailIsHtml ? emailBody.replace(/<[^>]+>/g, "") : emailBody,
-      html: htmlBody,
+      from: fromFull, to: r.email, subject: emailSubject, messageId,
+      text: msg.text,
+      html: msg.html + pixel,
     };
     // A random-attachment group (if set) overrides the fixed attachments — one
     // random file per recipient, mirroring random subject/body.
@@ -159,11 +203,17 @@ async function runLoop(campaignId) {
       mailOptions.attachments = mailAttachments;
     }
 
+    // Record the ids BEFORE sending so a (very fast) bounce notice can always be matched.
+    await pool.query(
+      "UPDATE campaign_recipients SET tracking_id=$1, message_id=$2, from_addr=$3, subject=$4 WHERE id=$5",
+      [trackingId, messageId, fromAddr, emailSubject, r.id]
+    );
+
     try {
-      await getTransporter(sender).sendMail(mailOptions);
+      const info = await getTransporter(sender).sendMail(mailOptions);
       await pool.query(
-        "UPDATE campaign_recipients SET status='sent', from_addr=$1, subject=$2, sent_at=NOW() WHERE id=$3",
-        [fromAddr, emailSubject, r.id]
+        "UPDATE campaign_recipients SET status='sent', from_addr=$1, subject=$2, smtp_response=$3, sent_at=NOW() WHERE id=$4",
+        [fromAddr, emailSubject, String((info && info.response) || "").slice(0, 300), r.id]
       );
       await pool.query("UPDATE campaigns SET sent_count = sent_count + 1 WHERE id=$1", [campaignId]);
       try {
@@ -174,12 +224,29 @@ async function runLoop(campaignId) {
       } catch (e) { console.error("sent_emails insert failed:", e.message); }
       console.log(`✅ [campaign:${campaignId}] ${fromAddr} → ${r.email}`);
     } catch (err) {
-      await pool.query(
-        "UPDATE campaign_recipients SET status='failed', from_addr=$1, subject=$2, error=$3, sent_at=NOW() WHERE id=$4",
-        [fromAddr, emailSubject, err.message, r.id]
-      );
+      // Was this a refusal of the recipient/message (a bounce), or some other failure?
+      const bounce = classifySendError(err);
+      if (bounce) {
+        await pool.query(
+          `UPDATE campaign_recipients SET status='failed', from_addr=$1, subject=$2, error=$3, sent_at=NOW(),
+                  bounce_type=$4, bounce_source='smtp', bounce_code=$5, bounce_reason=$6, bounce_detail=$7, bounced_at=NOW()
+            WHERE id=$8`,
+          [fromAddr, emailSubject, err.message, bounce.type, bounce.code, bounce.reason, bounce.response, r.id]
+        );
+      } else {
+        await pool.query(
+          "UPDATE campaign_recipients SET status='failed', from_addr=$1, subject=$2, error=$3, sent_at=NOW() WHERE id=$4",
+          [fromAddr, emailSubject, err.message, r.id]
+        );
+      }
       await pool.query("UPDATE campaigns SET failed_count = failed_count + 1 WHERE id=$1", [campaignId]);
       console.error(`❌ [campaign:${campaignId}] ${fromAddr} → ${r.email}: ${err.message}`);
+
+      // 3 (configurable) bounces in a row for one domain / sender → pause + alert.
+      if (bounce) {
+        try { await bounceGuard.evaluateAfterBounce(campaignId, { email: r.email, from_addr: fromAddr }); }
+        catch (e) { console.error("bounce check failed:", e.message); }
+      }
     }
   }
 

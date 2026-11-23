@@ -7,6 +7,7 @@ import {
   ArrowLeft, FolderOpen, UserPlus, AtSign, CheckCircle, FileText, Edit2, Type,
   Activity, BarChart3, MailOpen, Download,
   ShieldCheck, MailCheck, MailX, MailQuestion, Copy, ListChecks, ShieldQuestion,
+  Smile, PenTool, Settings, Bell, TriangleAlert, FileSpreadsheet, Inbox,
 } from "lucide-react";
 
 const onFocus = e => e.target.style.borderColor = "var(--accent)";
@@ -34,7 +35,27 @@ const PRESETS = {
   custom:    { label:"Custom SMTP",       host:"",                        port:"587" },
 };
 
-// ─── Shared ───────────────────────────────────────────────────────────────────
+// Max subjects / bodies / greetings / signatures per group (keep in sync with backend MAX_GROUP_ITEMS).
+const MAX_ITEMS = 50;
+
+// Download a file from an auth-protected endpoint (a plain <a href> can't send the token).
+async function downloadWithAuth(url, authHeader, fallbackName) {
+  const res = await fetch(url, { headers: authHeader });
+  if (!res.ok) {
+    let message = "Download failed.";
+    try { message = (await res.json()).message || message; } catch {}
+    throw new Error(message);
+  }
+  const blob = await res.blob();
+  const m = /filename="?([^";]+)"?/.exec(res.headers.get("Content-Disposition") || "");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = m ? m[1] : fallbackName;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// ─── Shared ─────────────────────────────────────────────────────────────────────
 function Field({ label, children }) {
   return <div style={{ marginBottom:14 }}>{label && <label style={S.label}>{label}</label>}{children}</div>;
 }
@@ -115,6 +136,43 @@ function ModeToggle({ value, onChange }) {
     <div style={{ display:"flex", gap:5 }}>
       <button type="button" onClick={() => onChange(false)} style={pill(!value, false)}>Single</button>
       <button type="button" onClick={() => onChange(true)}  style={pill(value, true)}>Group</button>
+    </div>
+  );
+}
+
+// Greeting / Signature block for Compose: optional single text, or a random pick from a group.
+function PoolTextField({ label, color, noun, pageName, groups, useGroup, setUseGroup, groupId, setGroupId, text, setText, isHtml, setIsHtml, placeholder, rows }) {
+  const faint = { background:`${color}10`, border:`1px solid ${color}33`, color };
+  return (
+    <div style={{ marginBottom:16 }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:6 }}>
+        <label style={{ ...S.label, marginBottom:0 }}>{label} <span style={{ textTransform:"none", letterSpacing:0, fontWeight:500 }}>(optional)</span></label>
+        <ModeToggle value={useGroup} onChange={setUseGroup}/>
+      </div>
+      {!useGroup ? (
+        <>
+          <textarea value={text} onChange={e => setText(e.target.value)} placeholder={placeholder}
+            style={{ ...S.textarea, minHeight: rows * 22 + 20 }} onFocus={onFocus} onBlur={onBlur}/>
+          <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", marginTop:8 }}>
+            <input type="checkbox" checked={isHtml} onChange={e => setIsHtml(e.target.checked)} style={{ accentColor:color }}/>
+            <span style={{ fontSize:12, color:"var(--text2)" }}>{label} is HTML</span>
+          </label>
+        </>
+      ) : groups.length === 0 ? (
+        <div style={{ padding:"14px", background:"var(--surface2)", borderRadius:"var(--radius)", fontSize:12, color:"var(--text3)", lineHeight:1.6 }}>
+          No {noun} groups yet.<br/>Go to <strong style={{ color }}>{pageName}</strong> page to create one.
+        </div>
+      ) : (
+        <>
+          <select value={groupId} onChange={e => setGroupId(e.target.value)} style={S.select} onFocus={onFocus} onBlur={onBlur}>
+            <option value="">— Select a {noun} group —</option>
+            {groups.map(g => <option key={g.id} value={g.id}>{g.name} ({g.item_count} {noun}s)</option>)}
+          </select>
+          {groupId && <div style={{ marginTop:8, padding:"8px 12px", borderRadius:"var(--radius)", fontSize:12, lineHeight:1.6, ...faint }}>
+            ✓ Each recipient gets a randomly picked {noun} from this group
+          </div>}
+        </>
+      )}
     </div>
   );
 }
@@ -201,6 +259,7 @@ function SenderGroupsPage({ authHeader }) {
   const [accUser,  setAccUser]  = useState("");
   const [accPass,  setAccPass]  = useState("");
   const [accName,  setAccName]  = useState("");
+  const [accImap,  setAccImap]  = useState("");
   const [adding,   setAdding]   = useState(false);
   const [testingId, setTestingId] = useState(null);
 
@@ -252,12 +311,12 @@ function SenderGroupsPage({ authHeader }) {
     try {
       const res  = await fetch(`/api/sender-groups/${activeGroup.id}/accounts`, {
         method:"POST", headers:{ ...authHeader, "Content-Type":"application/json" },
-        body: JSON.stringify({ host:accHost, port:accPort, username:accUser, password:accPass, fromName:accName }),
+        body: JSON.stringify({ host:accHost, port:accPort, username:accUser, password:accPass, fromName:accName, imapHost:accImap }),
       });
       const data = await res.json();
       if (data.ok) {
         showMsg("success", data.message);
-        setAccUser(""); setAccPass(""); setAccName("");
+        setAccUser(""); setAccPass(""); setAccName(""); setAccImap("");
         loadGroup(activeGroup);
       } else showMsg("error", data.message);
     } catch { showMsg("error", "Failed to add account."); }
@@ -405,6 +464,10 @@ function SenderGroupsPage({ authHeader }) {
               <TextInput label="Email (Username)" value={accUser} onChange={setAccUser} placeholder="info@yourdomain.com"/>
               <TextInput label="Password" type="password" value={accPass} onChange={setAccPass} placeholder="Email password"/>
               <TextInput label="Display Name (optional)" value={accName} onChange={setAccName} placeholder="Company Name" mono={false}/>
+              <TextInput label="IMAP Host (optional)" value={accImap} onChange={setAccImap} placeholder="auto-detected, e.g. imap.hostinger.com"/>
+              <div style={{ fontSize:10.5, color:"var(--text3)", marginTop:-8, marginBottom:12, lineHeight:1.5 }}>
+                Lets MailBlast read bounce notices from this mailbox. Leave blank to auto-detect from the SMTP host.
+              </div>
 
               <button onClick={handleAddAccount} disabled={adding} style={{ ...S.btnPrimary, width:"100%", marginTop:4 }}>
                 {adding ? <><Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> Testing & Adding...</> : <><Plus size={14}/> Add Account</>}
@@ -771,6 +834,19 @@ function ComposePage({ authHeader }) {
   const [attachmentGroupId,  setAttachmentGroupId]  = useState("");
   const [useAttachmentGroup, setUseAttachmentGroup] = useState(false);
 
+  // Greeting / signature (optional): single text or random from a group
+  const [greetingGroups,   setGreetingGroups]   = useState([]);
+  const [greetingGroupId,  setGreetingGroupId]  = useState("");
+  const [useGreetingGroup, setUseGreetingGroup] = useState(false);
+  const [greeting,         setGreeting]         = useState("");
+  const [greetingIsHtml,   setGreetingIsHtml]   = useState(false);
+  const [signatureGroups,   setSignatureGroups]   = useState([]);
+  const [signatureGroupId,  setSignatureGroupId]  = useState("");
+  const [useSignatureGroup, setUseSignatureGroup] = useState(false);
+  const [signature,         setSignature]         = useState("");
+  const [signatureIsHtml,   setSignatureIsHtml]   = useState(false);
+  const [imapHost, setImapHost] = useState(""); // optional — where bounce notices are read from
+
   const [to,       setTo]       = useState("");
   const [subject,  setSubject]  = useState("");
   const [body,     setBody]     = useState("");
@@ -800,6 +876,7 @@ function ComposePage({ authHeader }) {
           setSmtpUser(s.username || "");
           setSmtpPass(s.password || "");
           setFromName(s.from_name || "");
+          setImapHost(s.imap_host || "");
           setSmtpSaved(true);
           const match = Object.entries(PRESETS).find(([, p]) => p.host === s.host);
           setPreset(match ? match[0] : "custom");
@@ -824,6 +901,16 @@ function ComposePage({ authHeader }) {
       .then(data => { if (data.ok) setBodyGroups(data.groups); })
       .catch(() => {});
 
+    // Load greeting / signature groups
+    fetch("/api/greeting-groups", { headers: authHeader })
+      .then(r => r.json())
+      .then(data => { if (data.ok) setGreetingGroups(data.groups); })
+      .catch(() => {});
+    fetch("/api/signature-groups", { headers: authHeader })
+      .then(r => r.json())
+      .then(data => { if (data.ok) setSignatureGroups(data.groups); })
+      .catch(() => {});
+
     // Load attachment groups
     fetch("/api/attachment-groups", { headers: authHeader })
       .then(r => r.json())
@@ -843,7 +930,7 @@ function ComposePage({ authHeader }) {
     if (!smtpHost || !smtpUser || !smtpPass) return addLog("error", "❌ Fill in SMTP details first.");
     setSaving(true);
     try {
-      const res  = await fetch("/api/smtp/save", { method:"POST", headers:{ ...authHeader, "Content-Type":"application/json" }, body:JSON.stringify({ host:smtpHost, port:smtpPort, username:smtpUser, password:smtpPass, fromName }) });
+      const res  = await fetch("/api/smtp/save", { method:"POST", headers:{ ...authHeader, "Content-Type":"application/json" }, body:JSON.stringify({ host:smtpHost, port:smtpPort, username:smtpUser, password:smtpPass, fromName, imapHost }) });
       const data = await res.json();
       if (data.ok) { setSmtpSaved(true); addLog("success", "✅ SMTP settings saved."); }
       else addLog("error", `❌ ${data.message}`);
@@ -875,6 +962,8 @@ function ComposePage({ authHeader }) {
     if (useBodyGroup && !bodyGroupId)       return addLog("error", "❌ Select a Body Group.");
     if (!useBodyGroup && !body)             return addLog("error", "❌ Write a message body or select a Body Group.");
     if (useAttachmentGroup && !attachmentGroupId) return addLog("error", "❌ Select an Attachment Group.");
+    if (useGreetingGroup && !greetingGroupId)     return addLog("error", "❌ Select a Greeting Group (or switch Greeting to Single).");
+    if (useSignatureGroup && !signatureGroupId)   return addLog("error", "❌ Select a Signature Group (or switch Signature to Single).");
     if (recipientList.length === 0) return addLog("error", "❌ No valid emails found.");
 
     const min = parseFloat(minDelay)||30;
@@ -906,6 +995,11 @@ function ComposePage({ authHeader }) {
       fd.append("body",   body);
       fd.append("isHtml", isHtml ? "true" : "false");
     }
+    if (useGreetingGroup && greetingGroupId) fd.append("greetingGroupId", greetingGroupId);
+    else if (greeting.trim()) { fd.append("greeting", greeting); fd.append("greetingIsHtml", greetingIsHtml ? "true" : "false"); }
+    if (useSignatureGroup && signatureGroupId) fd.append("signatureGroupId", signatureGroupId);
+    else if (signature.trim()) { fd.append("signature", signature); fd.append("signatureIsHtml", signatureIsHtml ? "true" : "false"); }
+    if (!useSenderGroup && imapHost.trim()) fd.append("imapHost", imapHost.trim());
     fd.append("name", subject || "Campaign");
     fd.append("minDelay", min);    fd.append("maxDelay", max);
     if (useAttachmentGroup && attachmentGroupId) {
@@ -985,6 +1079,10 @@ function ComposePage({ authHeader }) {
             </div>
             <TextInput label="Username" value={smtpUser} onChange={setSmtpUser} placeholder="you@domain.com"/>
             <TextInput label="Password" type="password" value={smtpPass} onChange={setSmtpPass} placeholder="Password"/>
+            <TextInput label="IMAP Host (optional)" value={imapHost} onChange={setImapHost} placeholder="auto-detected, e.g. imap.hostinger.com"/>
+            <div style={{ fontSize:10.5, color:"var(--text3)", marginTop:-8, marginBottom:12, lineHeight:1.5 }}>
+              Used to read bounce notices from this mailbox so the report can tell you which emails really bounced.
+            </div>
             <div style={S.divider}/>
             <label style={S.label}>Display Name (optional)</label>
             <TextInput placeholder="Your Name" value={fromName} onChange={setFromName} mono={false}/>
@@ -1138,6 +1236,13 @@ function ComposePage({ authHeader }) {
             )}
           </div>
 
+          {/* ── Greeting ── */}
+          <PoolTextField label="Greeting" color="#10b981" noun="greeting" pageName="Greetings"
+            groups={greetingGroups} useGroup={useGreetingGroup} setUseGroup={setUseGreetingGroup}
+            groupId={greetingGroupId} setGroupId={setGreetingGroupId}
+            text={greeting} setText={setGreeting} isHtml={greetingIsHtml} setIsHtml={setGreetingIsHtml}
+            placeholder={"Hello,   (use {{email}} or {{domain}} to personalise)"} rows={2}/>
+
           {/* ── Message Body ── */}
           <div style={{ marginBottom:16 }}>
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:6 }}>
@@ -1173,6 +1278,13 @@ function ComposePage({ authHeader }) {
               </>
             )}
           </div>
+
+          {/* ── Signature ── */}
+          <PoolTextField label="Signature" color="#ec4899" noun="signature" pageName="Signatures"
+            groups={signatureGroups} useGroup={useSignatureGroup} setUseGroup={setUseSignatureGroup}
+            groupId={signatureGroupId} setGroupId={setSignatureGroupId}
+            text={signature} setText={setSignature} isHtml={signatureIsHtml} setIsHtml={setSignatureIsHtml}
+            placeholder={"Best regards,\nYour Name\nCompany"} rows={4}/>
         </div>
 
         {sending && progress && progress.total > 1 && (
@@ -1289,7 +1401,7 @@ function ItemGroupsPage({ authHeader, cfg }) {
         if (data.ok) { showMsg("success", `${cfg.noun[0].toUpperCase()+cfg.noun.slice(1)} updated.`); resetForm(); loadGroup(activeGroup); }
         else showMsg("error", data.message);
       } else {
-        if (items.length >= 20) return showMsg("error", "Maximum 20 allowed.");
+        if (items.length >= cfg.max) return showMsg("error", `Maximum ${cfg.max} allowed.`);
         const res  = await fetch(`${cfg.apiBase}/${activeGroup.id}/items`, {
           method:"POST", headers:{ ...authHeader, "Content-Type":"application/json" }, body: JSON.stringify(buildPayload()),
         });
@@ -1351,7 +1463,7 @@ function ItemGroupsPage({ authHeader, cfg }) {
                   <div style={{ fontWeight:700, fontSize:15 }}>{g.name}</div>
                   {g.description && <div style={{ fontSize:12, color:"var(--text3)", marginTop:2 }}>{g.description}</div>}
                   <div style={{ fontSize:11, color:"var(--text3)", marginTop:4, fontFamily:"var(--font-mono)" }}>
-                    {g.item_count}/20 {cfg.nounPlural} · {new Date(g.created_at).toLocaleDateString()}
+                    {g.item_count}/{cfg.max} {cfg.nounPlural} · {new Date(g.created_at).toLocaleDateString()}
                   </div>
                 </div>
                 <div style={{ display:"flex", gap:8 }}>
@@ -1376,7 +1488,7 @@ function ItemGroupsPage({ authHeader, cfg }) {
           <button onClick={() => setView("list")} style={{ ...S.btnSecondary, marginBottom:24, width:"fit-content" }}><ArrowLeft size={13}/> Back</button>
           <div style={{ maxWidth:520 }}>
             <div style={{ fontWeight:800, fontSize:22, marginBottom:6 }}>Create {cfg.title.slice(0,-1)}</div>
-            <div style={{ color:"var(--text3)", fontSize:13, marginBottom:24 }}>Name your group then add up to 20 {cfg.nounPlural}.</div>
+            <div style={{ color:"var(--text3)", fontSize:13, marginBottom:24 }}>Name your group then add up to {cfg.max} {cfg.nounPlural}.</div>
             <div style={S.card}>
               <TextInput label="Group Name" value={newName} onChange={setNewName} placeholder={cfg.namePlaceholder} mono={false}/>
               <Field label="Description (optional)">
@@ -1402,7 +1514,7 @@ function ItemGroupsPage({ authHeader, cfg }) {
               {activeGroup.description && <div style={{ color:"var(--text3)", fontSize:13 }}>{activeGroup.description}</div>}
             </div>
             <span style={{ ...S.chip, background:cfg.colorDim, color:cfg.color, fontSize:13, padding:"4px 12px" }}>
-              {items.length}/20 {cfg.nounPlural}
+              {items.length}/{cfg.max} {cfg.nounPlural}
             </span>
           </div>
 
@@ -1422,14 +1534,14 @@ function ItemGroupsPage({ authHeader, cfg }) {
 
               {cfg.multiline ? (
                 <>
-                  <Field label="Body Text">
+                  <Field label={cfg.fieldLabel || "Body Text"}>
                     <textarea value={itemText} onChange={e => setItemText(e.target.value)}
-                      placeholder={itemHtml ? "<p>Hello,</p>\n<p>Your message here...</p>" : "Hello,\n\nYour message here...\n\nBest regards"}
-                      style={{ ...S.textarea, minHeight:200 }} onFocus={onFocus} onBlur={onBlur}/>
+                      placeholder={itemHtml ? (cfg.placeholderHtml || "<p>Hello,</p>\n<p>Your message here...</p>") : (cfg.placeholderText || "Hello,\n\nYour message here...\n\nBest regards")}
+                      style={{ ...S.textarea, minHeight: cfg.minHeight || 200 }} onFocus={onFocus} onBlur={onBlur}/>
                   </Field>
                   <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", marginBottom:14 }}>
                     <input type="checkbox" checked={itemHtml} onChange={e => setItemHtml(e.target.checked)} style={{ accentColor:cfg.color }}/>
-                    <span style={{ fontSize:12, color:"var(--text2)" }}>HTML body</span>
+                    <span style={{ fontSize:12, color:"var(--text2)" }}>HTML {cfg.noun}</span>
                     {itemHtml && <span style={{ ...S.chip, background:cfg.colorDim, color:cfg.color }}>HTML</span>}
                   </label>
                 </>
@@ -1440,14 +1552,14 @@ function ItemGroupsPage({ authHeader, cfg }) {
                 </Field>
               )}
 
-              <button onClick={handleSaveItem} disabled={saving || (!editingId && items.length >= 20)}
-                style={{ ...S.btnPrimary, width:"100%", background:cfg.color, boxShadow:`0 0 18px ${cfg.colorDim}`, opacity:(saving || (!editingId && items.length >= 20)) ? 0.5 : 1 }}>
+              <button onClick={handleSaveItem} disabled={saving || (!editingId && items.length >= cfg.max)}
+                style={{ ...S.btnPrimary, width:"100%", background:cfg.color, boxShadow:`0 0 18px ${cfg.colorDim}`, opacity:(saving || (!editingId && items.length >= cfg.max)) ? 0.5 : 1 }}>
                 {saving ? <><Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> Saving...</>
                   : editingId ? <><CheckCircle size={14}/> Update</> : <><Plus size={14}/> Add {cfg.noun}</>}
               </button>
 
-              {!editingId && items.length >= 20 && (
-                <div style={{ marginTop:8, fontSize:11, color:"var(--amber)", textAlign:"center" }}>Maximum 20 {cfg.nounPlural} reached.</div>
+              {!editingId && items.length >= cfg.max && (
+                <div style={{ marginTop:8, fontSize:11, color:"var(--amber)", textAlign:"center" }}>Maximum {cfg.max} {cfg.nounPlural} reached.</div>
               )}
             </div>
 
@@ -1455,7 +1567,7 @@ function ItemGroupsPage({ authHeader, cfg }) {
             <div style={{ ...S.card, padding:0, overflow:"hidden" }}>
               <div style={{ padding:"16px 20px", borderBottom:"1px solid var(--border)", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
                 <span style={{ fontWeight:700, fontSize:15, textTransform:"capitalize" }}>{cfg.nounPlural}</span>
-                <span style={{ ...S.chip, background:"var(--surface2)", color:"var(--text2)" }}>{items.length}/20</span>
+                <span style={{ ...S.chip, background:"var(--surface2)", color:"var(--text2)" }}>{items.length}/{cfg.max}</span>
               </div>
 
               {items.length === 0 && (
@@ -1524,7 +1636,8 @@ const SUBJECT_CFG = {
   field:"subject", multiline:false, hasHtml:false,
   color:"#8b5cf6", colorDim:"rgba(139,92,246,0.15)", colorFaint:"rgba(139,92,246,0.06)",
   namePlaceholder:"e.g. Summer Subject Lines",
-  subtitle:"Add up to 20 subject lines per group. Each recipient gets a randomly picked subject.",
+  max:MAX_ITEMS,
+  subtitle:`Add up to ${MAX_ITEMS} subject lines per group. Each recipient gets a randomly picked subject. Use {{email}} / {{domain}} to personalise.`,
   icon:(size, opacity) => <Type size={size} color="#8b5cf6" style={opacity ? { opacity, display:"block", margin:"0 auto" } : undefined}/>,
 };
 
@@ -1533,9 +1646,33 @@ const BODY_CFG = {
   field:"body", multiline:true, hasHtml:true,
   color:"#0ea5e9", colorDim:"rgba(14,165,233,0.15)", colorFaint:"rgba(14,165,233,0.06)",
   namePlaceholder:"e.g. Summer Email Bodies",
-  subtitle:"Add up to 20 message bodies per group. Each recipient gets a randomly picked body.",
+  max:MAX_ITEMS,
+  subtitle:`Add up to ${MAX_ITEMS} message bodies per group. Each recipient gets a randomly picked body. Use {{email}} / {{domain}} to personalise.`,
   icon:(size, opacity) => <FileText size={size} color="#0ea5e9" style={opacity ? { opacity, display:"block", margin:"0 auto" } : undefined}/>,
 };
+
+const GREETING_CFG = {
+  apiBase:"/api/greeting-groups", title:"Greeting Groups", noun:"greeting", nounPlural:"greetings",
+  field:"body", multiline:true, hasHtml:true, fieldLabel:"Greeting Text", minHeight:90,
+  placeholderText:"Hello,", placeholderHtml:"<p>Hello,</p>", max:MAX_ITEMS,
+  color:"#10b981", colorDim:"rgba(16,185,129,0.15)", colorFaint:"rgba(16,185,129,0.06)",
+  namePlaceholder:"e.g. Friendly Openers",
+  subtitle:`Add up to ${MAX_ITEMS} greetings per group (Hello, Hi there, Dear Sir/Madam...). One is placed above the body for each recipient. Use {{email}} / {{domain}} to personalise.`,
+  icon:(size, opacity) => <Smile size={size} color="#10b981" style={opacity ? { opacity, display:"block", margin:"0 auto" } : undefined}/>,
+};
+
+const SIGNATURE_CFG = {
+  apiBase:"/api/signature-groups", title:"Signature Groups", noun:"signature", nounPlural:"signatures",
+  field:"body", multiline:true, hasHtml:true, fieldLabel:"Signature Text", minHeight:130,
+  placeholderText:"Best regards,\nJohn Smith\nSales Manager | Acme Inc.\n+1 555 0100", placeholderHtml:"<p>Best regards,<br><b>John Smith</b><br>Acme Inc.</p>", max:MAX_ITEMS,
+  color:"#ec4899", colorDim:"rgba(236,72,153,0.15)", colorFaint:"rgba(236,72,153,0.06)",
+  namePlaceholder:"e.g. Sales Team Signatures",
+  subtitle:`Add up to ${MAX_ITEMS} signatures per group. One is placed below the body for each recipient. Use {{email}} / {{domain}} to personalise.`,
+  icon:(size, opacity) => <PenTool size={size} color="#ec4899" style={opacity ? { opacity, display:"block", margin:"0 auto" } : undefined}/>,
+};
+
+function GreetingGroupsPage({ authHeader })  { return <ItemGroupsPage authHeader={authHeader} cfg={GREETING_CFG}/>; }
+function SignatureGroupsPage({ authHeader }) { return <ItemGroupsPage authHeader={authHeader} cfg={SIGNATURE_CFG}/>; }
 
 function SubjectGroupsPage({ authHeader }) { return <ItemGroupsPage authHeader={authHeader} cfg={SUBJECT_CFG}/>; }
 function BodyGroupsPage({ authHeader })    { return <ItemGroupsPage authHeader={authHeader} cfg={BODY_CFG}/>; }
@@ -2133,17 +2270,20 @@ function CampaignsPage({ authHeader }) {
               <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:12 }}>
                 <div style={{ fontWeight:700, fontSize:15, flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{c.name || `Campaign #${c.id}`}</div>
                 <StatusBadge status={c.status}/>
+                {c.status === "paused" && c.paused_by === "bounce" && <span style={{ ...S.chip, background:"var(--red-dim)", color:"var(--red)", fontWeight:700 }}><TriangleAlert size={11}/> Bounces</span>}
                 <span style={{ fontSize:11, color:"var(--text3)", fontFamily:"var(--font-mono)" }}>{new Date(c.created_at).toLocaleString()}</span>
               </div>
               <ProgressBar sent={c.sent_count} failed={c.failed_count} total={c.total} color={s.color}/>
               <div style={{ display:"flex", alignItems:"center", gap:14, marginTop:10 }}>
                 <span style={{ fontSize:12, color:"var(--green)", fontFamily:"var(--font-mono)" }}>✓ {c.sent_count} sent</span>
                 <span style={{ fontSize:12, color:"var(--red)", fontFamily:"var(--font-mono)" }}>✗ {c.failed_count} failed</span>
+                {c.bounced_count > 0 && <span style={{ fontSize:12, color:"var(--red)", fontFamily:"var(--font-mono)" }}>↩ {c.bounced_count} bounced</span>}
                 <span style={{ fontSize:12, color:"var(--text3)", fontFamily:"var(--font-mono)" }}>{c.total} total</span>
                 <div style={{ flex:1 }}/>
                 {c.status === "running" && <button onClick={e => { e.stopPropagation(); action(c.id, "pause"); }} style={{ ...S.btnSecondary, fontSize:12, padding:"6px 12px" }}>⏸ Pause</button>}
                 {c.status === "paused"  && <button onClick={e => { e.stopPropagation(); action(c.id, "resume"); }} style={{ ...S.btnSecondary, fontSize:12, padding:"6px 12px", borderColor:"var(--accent)", color:"var(--accent)" }}>▶ Resume</button>}
                 {active && <button onClick={e => { e.stopPropagation(); action(c.id, "stop"); }} style={{ ...S.btnSecondary, fontSize:12, padding:"6px 12px", borderColor:"var(--red)", color:"var(--red)" }}>⏹ Stop</button>}
+                {c.status === "completed" && <button onClick={e => { e.stopPropagation(); downloadWithAuth(`/api/campaigns/${c.id}/report`, authHeader, `campaign-${c.id}-report.xlsx`).catch(err => showMsg("error", err.message)); }} style={{ ...S.btnSecondary, fontSize:12, padding:"6px 12px", borderColor:"var(--green)", color:"var(--green)" }}><FileSpreadsheet size={13}/> Report</button>}
                 {!active && <button onClick={e => del(e, c.id)} style={{ ...S.btnSecondary, fontSize:12, padding:"6px 10px" }}><Trash2 size={13}/></button>}
               </div>
             </div>
@@ -2154,28 +2294,49 @@ function CampaignsPage({ authHeader }) {
   );
 }
 
+// Delivery states as computed by the server (see backend/campaignReport.js).
+const DELIVERY_UI = {
+  pending:          { label:"Pending",          color:"var(--text3)", icon:"…" },
+  failed:           { label:"Not sent",         color:"var(--red)",   icon:"✗" },
+  rejected:         { label:"Bounced",          color:"var(--red)",   icon:"↩" },
+  bounced:          { label:"Bounced",          color:"var(--red)",   icon:"↩" },
+  opened:           { label:"Opened",           color:"var(--green)", icon:"👁" },
+  likely_delivered: { label:"Delivered",        color:"var(--green)", icon:"✓" },
+  awaiting:         { label:"Awaiting check",   color:"var(--amber)", icon:"⏳" },
+  unverified:       { label:"Accepted (unchecked)", color:"var(--amber)", icon:"?" },
+};
+
+const DETAIL_FILTERS = [
+  ["all","All"], ["delivered","Delivered"], ["opened","Opened"], ["bounced","Bounced"], ["failed","Not sent"], ["unknown","Unconfirmed"],
+];
+
 function CampaignDetailPage({ authHeader }) {
   const { id }   = useParams();
   const navigate = useNavigate();
   const [campaign, setCampaign] = useState(null);
   const [recent,   setRecent]   = useState([]);
+  const [stats,    setStats]    = useState(null);
+  const [monitoring, setMonitoring] = useState([]);
+  const [rule,     setRule]     = useState(null);
+  const [filter,   setFilter]   = useState("all");
   const [loading,  setLoading]  = useState(true);
   const [error,    setError]    = useState("");
   const [msg,      setMsg]      = useState(null);
+  const [busy,     setBusy]     = useState("");
 
-  const showMsg = (type, text) => { setMsg({ type, text }); setTimeout(() => setMsg(null), 3000); };
+  const showMsg = (type, text) => { setMsg({ type, text }); setTimeout(() => setMsg(null), 4000); };
 
   const load = async () => {
     try {
-      const res  = await fetch(`/api/campaigns/${id}`, { headers: authHeader });
+      const res  = await fetch(`/api/campaigns/${id}?filter=${filter}&limit=200`, { headers: authHeader });
       const data = await res.json();
-      if (data.ok) { setCampaign(data.campaign); setRecent(data.recent); }
+      if (data.ok) { setCampaign(data.campaign); setRecent(data.recent); setStats(data.stats); setMonitoring(data.monitoring || []); setRule(data.rule); }
       else setError(data.message || "Not found.");
     } catch { setError("Failed to load."); }
     setLoading(false);
   };
 
-  useEffect(() => { load(); const t = setInterval(load, 2000); return () => clearInterval(t); }, [id]);
+  useEffect(() => { load(); const t = setInterval(load, 3000); return () => clearInterval(t); }, [id, filter]);
 
   const action = async (verb) => {
     try {
@@ -2186,8 +2347,26 @@ function CampaignDetailPage({ authHeader }) {
     } catch { showMsg("error", "Action failed."); }
   };
 
+  const checkBounces = async () => {
+    setBusy("check");
+    await action("check-bounces");
+    setBusy("");
+  };
+
+  const downloadReport = async () => {
+    setBusy("report");
+    try { await downloadWithAuth(`/api/campaigns/${id}/report`, authHeader, `campaign-${id}-report.xlsx`); }
+    catch (e) { showMsg("error", e.message); }
+    setBusy("");
+  };
+
   const s = campaign ? (CAMP_STATUS[campaign.status] || {}) : {};
   const active = campaign && (campaign.status === "running" || campaign.status === "paused");
+  const bouncePaused = campaign && campaign.status === "paused" && campaign.paused_by === "bounce";
+  const unmonitored = monitoring.filter(m => !m.ok);
+  const ruleText = rule && rule.enabled
+    ? `Auto-pause: ${rule.threshold} bounces in a row for the same ${rule.mode === "domain" ? "recipient domain" : rule.mode === "sender" ? "sending account" : "recipient domain or sending account"}`
+    : "Auto-pause on bounces is OFF";
 
   return (
     <div style={{ flex:1, padding:"28px 32px", overflowY:"auto" }}>
@@ -2203,46 +2382,226 @@ function CampaignDetailPage({ authHeader }) {
       {loading && !campaign && <div style={{ color:"var(--text3)", fontSize:13 }}>Loading...</div>}
       {error && !campaign && <div style={{ color:"var(--red)", fontSize:13 }}>{error}</div>}
 
-      {campaign && (
+      {campaign && stats && (
         <>
+          {bouncePaused && (
+            <div style={{ ...S.card, marginBottom:20, borderColor:"var(--red)", background:"var(--red-dim)", display:"flex", gap:14, alignItems:"flex-start" }}>
+              <TriangleAlert size={22} color="var(--red)" style={{ flexShrink:0, marginTop:2 }}/>
+              <div style={{ flex:1 }}>
+                <div style={{ fontWeight:700, fontSize:15, color:"var(--red)", marginBottom:4 }}>Paused automatically because of bounces</div>
+                <div style={{ fontSize:13, color:"var(--text)", lineHeight:1.6 }}>{campaign.pause_reason}</div>
+                <div style={{ fontSize:12, color:"var(--text3)", marginTop:8, lineHeight:1.6 }}>
+                  {campaign.bounce_alert_sent_at ? `📧 Alert email sent ${new Date(campaign.bounce_alert_sent_at).toLocaleString()}. `
+                    : campaign.bounce_alert_error ? `⚠ Alert email could not be sent: ${campaign.bounce_alert_error}. ` : ""}
+                  Check the bounced addresses below or in the report, fix the problem, then press Resume — Resume starts a fresh bounce count.
+                </div>
+              </div>
+            </div>
+          )}
+
           <div style={{ ...S.card, marginBottom:20 }}>
             <ProgressBar sent={campaign.sent_count} failed={campaign.failed_count} total={campaign.total} color={s.color}/>
-            <div style={{ display:"flex", gap:10, marginTop:16 }}>
+            <div style={{ display:"flex", gap:10, marginTop:16, flexWrap:"wrap", alignItems:"center" }}>
               {campaign.status === "running" && <button onClick={() => action("pause")}  style={{ ...S.btnSecondary }}>⏸ Pause</button>}
               {campaign.status === "paused"  && <button onClick={() => action("resume")} style={{ ...S.btnPrimary }}>▶ Resume</button>}
               {active && <button onClick={() => action("stop")} style={{ ...S.btnSecondary, borderColor:"var(--red)", color:"var(--red)" }}>⏹ Stop</button>}
+              <button onClick={checkBounces} disabled={busy==="check" || stats.attempted === 0} style={{ ...S.btnSecondary }} title="Read the sending mailbox now and look for bounce notices">
+                {busy==="check" ? <><Loader2 size={13} style={{ animation:"spin 1s linear infinite" }}/> Checking...</> : <><Inbox size={13}/> Check bounces now</>}
+              </button>
               <div style={{ flex:1 }}/>
-              {active && <span style={{ fontSize:12, color:"var(--text3)", alignSelf:"center" }}>Auto-refreshing every 2s — safe to close the browser.</span>}
+              <button onClick={downloadReport} disabled={busy==="report" || stats.attempted === 0}
+                style={{ ...S.btnPrimary, background: campaign.status === "completed" ? "var(--green)" : "var(--accent)", padding:"9px 18px" }}>
+                {busy==="report" ? <><Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> Preparing...</>
+                  : <><FileSpreadsheet size={15}/> {campaign.status === "completed" ? "Download Report" : "Download Report (so far)"}</>}
+              </button>
+            </div>
+            <div style={{ fontSize:11.5, color:"var(--text3)", marginTop:12, display:"flex", gap:14, flexWrap:"wrap" }}>
+              <span>🛡 {ruleText} — <span style={{ color:"var(--accent)", cursor:"pointer" }} onClick={() => navigate("/settings")}>change in Settings</span></span>
+              {active && <span>Auto-refreshing — safe to close the browser.</span>}
             </div>
           </div>
 
-          <div style={{ display:"grid", gridTemplateColumns:"repeat(4, 1fr)", gap:14, marginBottom:24 }}>
-            <StatCard icon={<Send size={20} color="var(--accent)"/>}    label="Total"  value={campaign.total}        color="#00e5ff"/>
-            <StatCard icon={<CheckCircle size={20} color="var(--green)"/>} label="Sent" value={campaign.sent_count}  color="#00ff87"/>
-            <StatCard icon={<AlertCircle size={20} color="var(--red)"/>}  label="Failed" value={campaign.failed_count} color="#ff4d6d"/>
-            <StatCard icon={<Clock size={20} color="var(--amber)"/>}     label="Remaining" value={Math.max(0, campaign.total - campaign.sent_count - campaign.failed_count)} color="#ffb703"/>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(4, 1fr)", gap:14, marginBottom:14 }}>
+            <StatCard icon={<Send size={20} color="var(--accent)"/>}    label="Total"  value={stats.total}        color="#00e5ff"/>
+            <StatCard icon={<CheckCircle size={20} color="var(--green)"/>} label="Delivered" value={stats.delivered}  color="#00ff87"/>
+            <StatCard icon={<MailOpen size={20} color="#8b5cf6"/>}        label={`Opened (${stats.open_rate}%)`} value={stats.opened} color="#8b5cf6"/>
+            <StatCard icon={<MailX size={20} color="var(--red)"/>}        label={`Bounced (${stats.bounce_rate}%)`} value={stats.bounced} color="#ff4d6d"/>
+          </div>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(4, 1fr)", gap:14, marginBottom:20 }}>
+            <StatCard icon={<AlertCircle size={20} color="var(--red)"/>}  label="Not sent (errors)" value={stats.failed} color="#ff4d6d"/>
+            <StatCard icon={<MailQuestion size={20} color="var(--amber)"/>} label="Unconfirmed" value={stats.unknown} color="#ffb703"/>
+            <StatCard icon={<Clock size={20} color="var(--amber)"/>}     label="Remaining" value={stats.by.pending} color="#ffb703"/>
+            <StatCard icon={<Send size={20} color="var(--accent)"/>}      label="Accepted by server" value={campaign.sent_count} color="#00e5ff"/>
+          </div>
+
+          <div style={{ ...S.card, marginBottom:20, padding:"16px 20px" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
+              <Inbox size={14} color="var(--accent)"/><span style={{ fontWeight:700, fontSize:13 }}>Bounce monitoring</span>
+            </div>
+            {monitoring.length === 0 && <div style={{ fontSize:12, color:"var(--text3)" }}>Starts once the first email is sent.</div>}
+            {monitoring.map(m => (
+              <div key={m.sender} style={{ fontSize:12, fontFamily:"var(--font-mono)", color: m.ok ? "var(--green)" : "var(--amber)", lineHeight:1.7 }}>
+                {m.ok ? "✓" : "⚠"} {m.sender} — {m.ok ? `mailbox checked ${new Date(m.last_scan_at).toLocaleTimeString()}` : (m.error || "not checked yet (first check runs within ~2 minutes)")}
+              </div>
+            ))}
+            {unmonitored.length > 0 && (
+              <div style={{ fontSize:11.5, color:"var(--text3)", marginTop:8, lineHeight:1.6 }}>
+                Where a mailbox can't be checked, bounces that arrive later are invisible, so those emails show as “Accepted (unchecked)” — not “Delivered”.
+                Fix: enable IMAP for that mailbox and/or set its IMAP host.
+              </div>
+            )}
           </div>
 
           <div style={{ ...S.card, padding:0, overflow:"hidden" }}>
-            <div style={{ padding:"16px 20px", borderBottom:"1px solid var(--border)", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
-              <span style={{ fontWeight:700, fontSize:15 }}>Recent Activity</span>
-              <span style={{ ...S.chip, background:"var(--surface2)", color:"var(--text2)" }}>last {recent.length}</span>
-            </div>
-            {recent.length === 0 && <div style={{ padding:"40px 20px", textAlign:"center", color:"var(--text3)", fontSize:13 }}>No emails processed yet.</div>}
-            <div style={{ maxHeight:460, overflowY:"auto", fontFamily:"var(--font-mono)", fontSize:12 }}>
-              {recent.map((r, i) => (
-                <div key={i} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 20px", borderBottom:"1px solid var(--border)", color: r.status==="sent" ? "var(--green)" : "var(--red)" }}>
-                  <span style={{ flexShrink:0 }}>{r.status==="sent" ? "✅" : "❌"}</span>
-                  <span style={{ flex:1, minWidth:0, color:"var(--text2)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{r.email}</span>
-                  {r.from_addr && <span style={{ color:"var(--text3)", flexShrink:0 }}>← {r.from_addr}</span>}
-                  <span style={{ color:"var(--text3)", flexShrink:0 }}>{r.sent_at ? new Date(r.sent_at).toLocaleTimeString() : ""}</span>
-                  {r.status!=="sent" && r.error && <span style={{ color:"var(--red)", flexShrink:0, maxWidth:200, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={r.error}>{r.error}</span>}
-                </div>
+            <div style={{ padding:"14px 20px", borderBottom:"1px solid var(--border)", display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
+              <span style={{ fontWeight:700, fontSize:15, marginRight:6 }}>Recipients</span>
+              {DETAIL_FILTERS.map(([k, label]) => (
+                <button key={k} onClick={() => setFilter(k)}
+                  style={{ ...S.chip, cursor:"pointer", border:"1px solid", padding:"4px 12px",
+                    background: filter===k ? "var(--accent-dim)" : "transparent",
+                    borderColor: filter===k ? "var(--accent)" : "var(--border2)",
+                    color: filter===k ? "var(--accent)" : "var(--text3)" }}>{label}</button>
               ))}
+              <div style={{ flex:1 }}/>
+              <span style={{ ...S.chip, background:"var(--surface2)", color:"var(--text2)" }}>showing {recent.length}</span>
+            </div>
+            {recent.length === 0 && <div style={{ padding:"40px 20px", textAlign:"center", color:"var(--text3)", fontSize:13 }}>Nothing here yet.</div>}
+            <div style={{ maxHeight:520, overflowY:"auto", fontFamily:"var(--font-mono)", fontSize:12 }}>
+              {recent.map((r) => {
+                const d = DELIVERY_UI[r.delivery] || DELIVERY_UI.unverified;
+                const why = r.bounce_reason ? `${r.bounce_reason}${r.bounce_code ? ` (${r.bounce_code})` : ""}` : (r.error || "");
+                return (
+                  <div key={r.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 20px", borderBottom:"1px solid var(--border)" }}>
+                    <span style={{ ...S.chip, background:"var(--surface2)", color:d.color, flexShrink:0, minWidth:92, justifyContent:"center" }}>{d.icon} {d.label}</span>
+                    <span style={{ flex:1, minWidth:0, color:"var(--text2)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{r.email}</span>
+                    {why && <span style={{ color:"var(--red)", flexShrink:0, maxWidth:260, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={r.bounce_detail || why}>{why}</span>}
+                    {r.open_count > 0 && <span style={{ color:"var(--green)", flexShrink:0 }}>👁 ×{r.open_count}</span>}
+                    {r.from_addr && <span style={{ color:"var(--text3)", flexShrink:0 }}>← {r.from_addr}</span>}
+                    <span style={{ color:"var(--text3)", flexShrink:0 }}>{r.sent_at ? new Date(r.sent_at).toLocaleTimeString() : ""}</span>
+                  </div>
+                );
+              })}
             </div>
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+// ─── SETTINGS ─────────────────────────────────────────────────────────────────
+const ALERT_VARS = ["user_name","campaign_name","campaign_url","trigger_type","trigger_value","bounce_count","threshold","last_reason","bounced_emails","sent_count","total","time"];
+
+function SettingsPage({ authHeader }) {
+  const [form, setForm] = useState(null);
+  const [defaults, setDefaults] = useState(null);
+  const [accountEmail, setAccountEmail] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const bodyRef = useRef();
+
+  const showMsg = (type, text) => { setMsg({ type, text }); setTimeout(() => setMsg(null), 5000); };
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  useEffect(() => {
+    fetch("/api/settings", { headers: authHeader }).then(r => r.json()).then(d => {
+      if (d.ok) { setForm(d.settings); setDefaults(d.defaults); setAccountEmail(d.accountEmail); }
+    }).catch(() => showMsg("error", "Failed to load settings."));
+  }, []);
+
+  const send = async (url, method) => {
+    const res = await fetch(url, { method, headers:{ ...authHeader, "Content-Type":"application/json" }, body: JSON.stringify(form) });
+    return res.json();
+  };
+  const save = async () => {
+    setSaving(true);
+    try { const d = await send("/api/settings", "PUT"); showMsg(d.ok ? "success" : "error", d.message); if (d.ok) setForm(d.settings); }
+    catch { showMsg("error", "Failed to save."); }
+    setSaving(false);
+  };
+  const test = async () => {
+    setTesting(true);
+    try { const d = await send("/api/settings/test-alert", "POST"); showMsg(d.ok ? "success" : "error", d.message); }
+    catch { showMsg("error", "Failed to send test."); }
+    setTesting(false);
+  };
+  const insertVar = (v) => {
+    const el = bodyRef.current; const tag = `{{${v}}}`;
+    if (!el) return set("alert_body", (form.alert_body || "") + tag);
+    const a = el.selectionStart, b = el.selectionEnd;
+    set("alert_body", form.alert_body.slice(0, a) + tag + form.alert_body.slice(b));
+    setTimeout(() => { el.focus(); el.setSelectionRange(a + tag.length, a + tag.length); }, 0);
+  };
+
+  if (!form) return <div style={{ flex:1, padding:"28px 32px", color:"var(--text3)" }}>Loading...</div>;
+
+  const Toggle = ({ on, onChange, label, hint }) => (
+    <label style={{ display:"flex", gap:10, cursor:"pointer", alignItems:"flex-start", marginBottom:14 }}>
+      <input type="checkbox" checked={on} onChange={e => onChange(e.target.checked)} style={{ accentColor:"var(--accent)", marginTop:3 }}/>
+      <span><span style={{ fontSize:13, fontWeight:600 }}>{label}</span>{hint && <span style={{ display:"block", fontSize:11.5, color:"var(--text3)", marginTop:2, lineHeight:1.5 }}>{hint}</span>}</span>
+    </label>
+  );
+
+  return (
+    <div style={{ flex:1, padding:"28px 32px", overflowY:"auto" }}>
+      <Toast msg={msg}/>
+      <div style={{ fontWeight:800, fontSize:22, letterSpacing:"-0.5px" }}>Settings</div>
+      <div style={{ color:"var(--text3)", fontSize:13, marginTop:3, marginBottom:24 }}>Bounce protection and the alert email you receive when a campaign is paused.</div>
+
+      <div style={{ display:"grid", gridTemplateColumns:"minmax(300px, 380px) 1fr", gap:20, alignItems:"start" }}>
+        <div style={S.card}>
+          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:16 }}>
+            <ShieldCheck size={15} color="var(--accent)"/><span style={{ fontWeight:700, fontSize:15 }}>Bounce protection</span>
+          </div>
+          <Toggle on={form.bounce_pause_enabled} onChange={v => set("bounce_pause_enabled", v)}
+            label="Auto-pause campaigns on repeated bounces" hint="Protects your sender reputation: sending to dead addresses gets mail accounts flagged or blocked."/>
+          <Field label="Pause after this many bounces in a row">
+            <input type="number" min="2" max="50" value={form.bounce_threshold} onChange={e => set("bounce_threshold", e.target.value)} style={S.input} onFocus={onFocus} onBlur={onBlur}/>
+          </Field>
+          <Field label="Count bounces in a row by">
+            <select value={form.bounce_mode} onChange={e => set("bounce_mode", e.target.value)} style={S.select} onFocus={onFocus} onBlur={onBlur}>
+              <option value="both">Recipient domain OR sending account (recommended)</option>
+              <option value="domain">Recipient domain only</option>
+              <option value="sender">Sending account only</option>
+            </select>
+          </Field>
+          <div style={{ fontSize:11.5, color:"var(--text3)", lineHeight:1.7, background:"var(--surface2)", padding:"10px 12px", borderRadius:"var(--radius)" }}>
+            <b>Recipient domain:</b> e.g. {form.bounce_threshold} emails to <span style={{ fontFamily:"var(--font-mono)" }}>@oldcompany.com</span>, one after another, all bounced.<br/>
+            <b>Sending account:</b> {form.bounce_threshold} emails sent from the same account (e.g. <span style={{ fontFamily:"var(--font-mono)" }}>sales@you.com</span>) in a row all bounced — usually means that account is blocked or the list is bad.<br/>
+            A successful email to the same domain/account resets the count. Network or password errors are not counted as bounces.
+          </div>
+        </div>
+
+        <div style={S.card}>
+          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:16 }}>
+            <Bell size={15} color="var(--amber)"/><span style={{ fontWeight:700, fontSize:15 }}>Alert email</span>
+          </div>
+          <Toggle on={form.alert_enabled} onChange={v => set("alert_enabled", v)} label="Email me when a campaign is auto-paused"
+            hint="Sent from one of the campaign's own SMTP accounts (or ALERT_SMTP_* server settings, if configured)."/>
+          <Field label="Send alerts to">
+            <input value={form.alert_to} onChange={e => set("alert_to", e.target.value)} placeholder={`${accountEmail} (your account email)`} style={S.input} onFocus={onFocus} onBlur={onBlur}/>
+          </Field>
+          <Field label="Subject">
+            <input value={form.alert_subject} onChange={e => set("alert_subject", e.target.value)} style={{ ...S.input, fontFamily:"var(--font-display)" }} onFocus={onFocus} onBlur={onBlur}/>
+          </Field>
+          <Field label="Message">
+            <textarea ref={bodyRef} value={form.alert_body} onChange={e => set("alert_body", e.target.value)} style={{ ...S.textarea, minHeight:260 }} onFocus={onFocus} onBlur={onBlur}/>
+          </Field>
+          <div style={{ fontSize:11, color:"var(--text3)", marginBottom:6 }}>Click a placeholder to insert it into the message:</div>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:6, marginBottom:18 }}>
+            {ALERT_VARS.map(v => (
+              <button key={v} onClick={() => insertVar(v)} style={{ ...S.chip, cursor:"pointer", border:"1px solid var(--border2)", background:"var(--surface2)", color:"var(--text2)" }}>{`{{${v}}}`}</button>
+            ))}
+          </div>
+          <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+            <button onClick={save} disabled={saving} style={S.btnPrimary}>{saving ? <><Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> Saving...</> : <><Save size={14}/> Save Settings</>}</button>
+            <button onClick={test} disabled={testing} style={S.btnSecondary}>{testing ? <Loader2 size={13} style={{ animation:"spin 1s linear infinite" }}/> : <Send size={13}/>} Send test alert</button>
+            <button onClick={() => setForm(f => ({ ...f, alert_subject: defaults.alert_subject, alert_body: defaults.alert_body }))} style={S.btnSecondary}><RefreshCw size={13}/> Reset template</button>
+          </div>
+          <div style={{ fontSize:11, color:"var(--text3)", marginTop:10 }}>The test uses the template as shown above (even if unsaved) with sample data.</div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2678,17 +3037,20 @@ function MainApp({ user, token, onLogout }) {
     { to:"/compose",          label:"Compose",           icon:<Mail size={13}/> },
     { to:"/campaigns",        label:"Campaigns",         icon:<Send size={13}/> },
     { to:"/subject-groups",   label:"Subject Groups",    icon:<Type size={13}/> },
+    { to:"/greeting-groups",  label:"Greetings",         icon:<Smile size={13}/> },
     { to:"/body-groups",      label:"Body Groups",       icon:<FileText size={13}/> },
+    { to:"/signature-groups", label:"Signatures",        icon:<PenTool size={13}/> },
     { to:"/attachment-groups",label:"Attachment Groups", icon:<Paperclip size={13}/> },
     { to:"/sender-groups",    label:"Sender Groups",     icon:<AtSign size={13}/> },
     { to:"/recipient-groups", label:"Recipient Groups",  icon:<Users size={13}/> },
     { to:"/email-verifier",   label:"Email Verifier",    icon:<ShieldCheck size={13}/> },
     { to:"/tracking",         label:"Tracking",          icon:<Activity size={13}/> },
+    { to:"/settings",         label:"Settings",          icon:<Settings size={13}/> },
   ];
 
   const navStyle = ({ isActive }) => ({
-    display:"flex", alignItems:"center", gap:6, padding:"7px 14px", borderRadius:"var(--radius)", border:"none", cursor:"pointer",
-    textDecoration:"none", fontFamily:"var(--font-display)", fontWeight:600, fontSize:13, transition:"all 0.15s",
+    display:"flex", alignItems:"center", gap:6, padding:"6px 10px", borderRadius:"var(--radius)", border:"none", cursor:"pointer",
+    textDecoration:"none", fontFamily:"var(--font-display)", fontWeight:600, fontSize:12.5, transition:"all 0.15s", whiteSpace:"nowrap",
     background: isActive ? "var(--accent-dim)" : "transparent",
     color: isActive ? "var(--accent)" : "var(--text3)",
   });
@@ -2699,9 +3061,9 @@ function MainApp({ user, token, onLogout }) {
         <div style={{ display:"flex", alignItems:"center", gap:10, fontWeight:800, fontSize:20, letterSpacing:"-0.5px" }}>
           <div style={{ width:32, height:32, background:"var(--accent)", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", color:"var(--bg)" }}><Zap size={17}/></div>
           MailBlast
-          <span style={{ fontSize:10, fontFamily:"var(--font-mono)", padding:"2px 7px", background:"var(--accent-dim)", color:"var(--accent)", borderRadius:100, border:"1px solid rgba(0,229,255,0.3)", marginLeft:4 }}>v4</span>
+          <span style={{ fontSize:10, fontFamily:"var(--font-mono)", padding:"2px 7px", background:"var(--accent-dim)", color:"var(--accent)", borderRadius:100, border:"1px solid rgba(0,229,255,0.3)", marginLeft:4 }}>v5</span>
         </div>
-        <div style={{ display:"flex", gap:4 }}>
+        <div style={{ display:"flex", gap:2, flexWrap:"wrap", justifyContent:"center", flex:1, margin:"0 16px" }}>
           {NAV.map(n => (
             <NavLink key={n.to} to={n.to} style={navStyle}>{n.icon}{n.label}</NavLink>
           ))}
@@ -2725,7 +3087,10 @@ function MainApp({ user, token, onLogout }) {
         <Route path="/campaigns"        element={<CampaignsPage authHeader={authHeader}/>}/>
         <Route path="/campaigns/:id"    element={<CampaignDetailPage authHeader={authHeader}/>}/>
         <Route path="/subject-groups"   element={<SubjectGroupsPage authHeader={authHeader}/>}/>
+        <Route path="/greeting-groups"  element={<GreetingGroupsPage authHeader={authHeader}/>}/>
         <Route path="/body-groups"      element={<BodyGroupsPage authHeader={authHeader}/>}/>
+        <Route path="/signature-groups" element={<SignatureGroupsPage authHeader={authHeader}/>}/>
+        <Route path="/settings"         element={<SettingsPage authHeader={authHeader}/>}/>
         <Route path="/attachment-groups" element={<AttachmentGroupsPage authHeader={authHeader}/>}/>
         <Route path="/sender-groups"    element={<SenderGroupsPage authHeader={authHeader}/>}/>
         <Route path="/recipient-groups" element={<RecipientGroupsPage authHeader={authHeader}/>}/>

@@ -13,6 +13,10 @@ const { pool, initDB } = require("./db");
 const campaignRunner   = require("./campaignRunner");
 const emailVerifier    = require("./emailVerifier");
 const deepVerifier     = require("./deepVerifier");
+const bounceScanner    = require("./bounceScanner");
+const bounceGuard      = require("./bounceGuard");
+const campaignReport   = require("./campaignReport");
+const { MAX_GROUP_ITEMS, DEFAULT_SETTINGS, deriveImapHost } = require("./mailUtils");
 
 // Where campaign attachments are persisted so the background worker can read
 // them after the request that created the campaign is long gone.
@@ -88,7 +92,7 @@ function pickRandom(arr) {
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", version: "4.0.0", timestamp: new Date().toISOString() });
+  res.json({ status: "ok", version: "5.0.0", timestamp: new Date().toISOString() });
 });
 
 // ─── TRACKING PIXEL (public, no auth) ─────────────────────────────────────────
@@ -173,20 +177,20 @@ app.get("/api/auth/me", authMiddleware, async (req, res) => {
 
 // ─── SMTP: Save ───────────────────────────────────────────────────────────────
 app.post("/api/smtp/save", authMiddleware, async (req, res) => {
-  const { host, port, username, password, fromName } = req.body;
+  const { host, port, username, password, fromName, imapHost } = req.body;
   if (!host || !username || !password)
     return res.json({ ok: false, message: "Host, username and password are required." });
   try {
     const exists = await pool.query("SELECT id FROM smtp_settings WHERE user_id = $1", [req.user.id]);
     if (exists.rows.length > 0) {
       await pool.query(
-        "UPDATE smtp_settings SET host=$1, port=$2, username=$3, password=$4, from_name=$5, updated_at=NOW() WHERE user_id=$6",
-        [host, port || 587, username, password, fromName || "", req.user.id]
+        "UPDATE smtp_settings SET host=$1, port=$2, username=$3, password=$4, from_name=$5, imap_host=$6, updated_at=NOW() WHERE user_id=$7",
+        [host, port || 587, username, password, fromName || "", (imapHost || "").trim() || null, req.user.id]
       );
     } else {
       await pool.query(
-        "INSERT INTO smtp_settings (user_id, host, port, username, password, from_name) VALUES ($1,$2,$3,$4,$5,$6)",
-        [req.user.id, host, port || 587, username, password, fromName || ""]
+        "INSERT INTO smtp_settings (user_id, host, port, username, password, from_name, imap_host) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+        [req.user.id, host, port || 587, username, password, fromName || "", (imapHost || "").trim() || null]
       );
     }
     res.json({ ok: true, message: "SMTP settings saved." });
@@ -198,7 +202,7 @@ app.post("/api/smtp/save", authMiddleware, async (req, res) => {
 // ─── SMTP: Load ───────────────────────────────────────────────────────────────
 app.get("/api/smtp/load", authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query("SELECT host, port, username, password, from_name FROM smtp_settings WHERE user_id = $1", [req.user.id]);
+    const result = await pool.query("SELECT host, port, username, password, from_name, imap_host FROM smtp_settings WHERE user_id = $1", [req.user.id]);
     res.json({ ok: true, smtp: result.rows.length > 0 ? result.rows[0] : null });
   } catch (err) {
     res.json({ ok: false, message: "Failed to load SMTP settings." });
@@ -399,7 +403,7 @@ app.get("/api/sender-groups/:id", authMiddleware, async (req, res) => {
   try {
     const g = await pool.query("SELECT * FROM sender_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
     if (g.rows.length === 0) return res.json({ ok: false, message: "Sender group not found." });
-    const a = await pool.query("SELECT id, host, port, username, from_name, added_at FROM sender_accounts WHERE group_id=$1 ORDER BY added_at ASC", [req.params.id]);
+    const a = await pool.query("SELECT id, host, port, username, from_name, imap_host, added_at FROM sender_accounts WHERE group_id=$1 ORDER BY added_at ASC", [req.params.id]);
     res.json({ ok: true, group: g.rows[0], accounts: a.rows });
   } catch (err) {
     res.json({ ok: false, message: err.message });
@@ -418,7 +422,7 @@ app.delete("/api/sender-groups/:id", authMiddleware, async (req, res) => {
 
 // ─── SENDER GROUPS: Add account ───────────────────────────────────────────────
 app.post("/api/sender-groups/:id/accounts", authMiddleware, async (req, res) => {
-  const { host, port, username, password, fromName } = req.body;
+  const { host, port, username, password, fromName, imapHost } = req.body;
   if (!host || !username || !password)
     return res.json({ ok: false, message: "Host, username and password are required." });
   const g = await pool.query("SELECT id FROM sender_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
@@ -428,8 +432,8 @@ app.post("/api/sender-groups/:id/accounts", authMiddleware, async (req, res) => 
     const transporter = createTransporter({ host, port: port || 587, username, password });
     await transporter.verify();
     await pool.query(
-      "INSERT INTO sender_accounts (group_id, host, port, username, password, from_name) VALUES ($1,$2,$3,$4,$5,$6)",
-      [req.params.id, host, port || 587, username, password, fromName || ""]
+      "INSERT INTO sender_accounts (group_id, host, port, username, password, from_name, imap_host) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+      [req.params.id, host, port || 587, username, password, fromName || "", (imapHost || "").trim() || null]
     );
     res.json({ ok: true, message: `${username} added and verified.` });
   } catch (err) {
@@ -466,7 +470,8 @@ app.post("/api/sender-groups/:id/accounts/:accountId/test", authMiddleware, asyn
 
 // ─── CAMPAIGNS: Create & start (runs in the background) ───────────────────────
 app.post("/api/campaigns", authMiddleware, upload.array("attachments", 10), async (req, res) => {
-  const { smtpHost, smtpPort, smtpUser, smtpPass, fromName, to, subject, body, isHtml, minDelay, maxDelay, senderGroupId, subjectGroupId, bodyGroupId, attachmentGroupId, name } = req.body;
+  const { smtpHost, smtpPort, smtpUser, smtpPass, fromName, to, subject, body, isHtml, minDelay, maxDelay, senderGroupId, subjectGroupId, bodyGroupId, attachmentGroupId, name,
+          greeting, greetingIsHtml, greetingGroupId, signature, signatureIsHtml, signatureGroupId, imapHost } = req.body;
 
   if (!to) return res.json({ ok: false, message: "Recipient (To) is required." });
 
@@ -500,6 +505,16 @@ app.post("/api/campaigns", authMiddleware, upload.array("attachments", 10), asyn
     if (ag.rows.length === 0) return res.json({ ok: false, message: "Attachment group has no files. Add attachments first." });
   }
 
+  // Greeting / signature — optional; either a group or a single text.
+  if (greetingGroupId) {
+    const gi = await pool.query("SELECT 1 FROM greeting_items gi JOIN greeting_groups gg ON gg.id=gi.group_id WHERE gi.group_id=$1 AND gg.user_id=$2 LIMIT 1", [greetingGroupId, req.user.id]);
+    if (gi.rows.length === 0) return res.json({ ok: false, message: "Greeting group has no greetings. Add greetings first." });
+  }
+  if (signatureGroupId) {
+    const si = await pool.query("SELECT 1 FROM signature_items si JOIN signature_groups sg ON sg.id=si.group_id WHERE si.group_id=$1 AND sg.user_id=$2 LIMIT 1", [signatureGroupId, req.user.id]);
+    if (si.rows.length === 0) return res.json({ ok: false, message: "Signature group has no signatures. Add signatures first." });
+  }
+
   const recipients = parseRecipients(to);
   if (recipients.length === 0) return res.json({ ok: false, message: "No valid email addresses found." });
 
@@ -513,14 +528,18 @@ app.post("/api/campaigns", authMiddleware, upload.array("attachments", 10), asyn
     const ins = await pool.query(
       `INSERT INTO campaigns
          (user_id, name, status, total, subject, body, is_html, subject_group_id, body_group_id, sender_group_id,
-          smtp_host, smtp_port, smtp_user, smtp_pass, from_name, min_delay, max_delay, base_url, attachment_group_id)
-       VALUES ($1,$2,'running',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id`,
+          smtp_host, smtp_port, smtp_user, smtp_pass, from_name, min_delay, max_delay, base_url, attachment_group_id,
+          greeting, greeting_is_html, greeting_group_id, signature, signature_is_html, signature_group_id, imap_host)
+       VALUES ($1,$2,'running',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25) RETURNING id`,
       [req.user.id, campaignName, recipients.length,
        subjectGroupId ? null : subject, bodyGroupId ? null : body, useHtml,
        subjectGroupId || null, bodyGroupId || null, senderGroupId || null,
        senderGroupId ? null : smtpHost, senderGroupId ? null : (parseInt(smtpPort, 10) || 587),
        senderGroupId ? null : smtpUser, senderGroupId ? null : smtpPass, senderGroupId ? null : (fromName || ""),
-       minS, maxS, baseUrl, attachmentGroupId || null]
+       minS, maxS, baseUrl, attachmentGroupId || null,
+       greetingGroupId ? null : ((greeting || "").trim() || null), greetingIsHtml === "true" || greetingIsHtml === true, greetingGroupId || null,
+       signatureGroupId ? null : ((signature || "").trim() || null), signatureIsHtml === "true" || signatureIsHtml === true, signatureGroupId || null,
+       senderGroupId ? null : ((imapHost || "").trim() || null)]
     );
     const campaignId = ins.rows[0].id;
 
@@ -561,8 +580,9 @@ app.post("/api/campaigns", authMiddleware, upload.array("attachments", 10), asyn
 app.get("/api/campaigns", authMiddleware, async (req, res) => {
   try {
     const r = await pool.query(
-      `SELECT id, name, status, total, sent_count, failed_count, created_at, finished_at
-       FROM campaigns WHERE user_id=$1 ORDER BY created_at DESC LIMIT 200`,
+      `SELECT c.id, c.name, c.status, c.total, c.sent_count, c.failed_count, c.created_at, c.finished_at, c.paused_by, c.pause_reason,
+              (SELECT COUNT(*) FROM campaign_recipients r WHERE r.campaign_id=c.id AND r.bounce_type IS NOT NULL)::int AS bounced_count
+       FROM campaigns c WHERE c.user_id=$1 ORDER BY c.created_at DESC LIMIT 200`,
       [req.user.id]
     );
     res.json({ ok: true, campaigns: r.rows });
@@ -571,21 +591,56 @@ app.get("/api/campaigns", authMiddleware, async (req, res) => {
   }
 });
 
-// ─── CAMPAIGNS: Detail + recent results ───────────────────────────────────────
+// ─── CAMPAIGNS: Detail + delivery stats + recent results ──────────────────────
+// ?filter=all|delivered|opened|bounced|failed|unknown|pending  &limit=100
 app.get("/api/campaigns/:id", authMiddleware, async (req, res) => {
   try {
     const c = await pool.query(
-      `SELECT id, name, status, total, sent_count, failed_count, is_html, min_delay, max_delay, created_at, finished_at
+      `SELECT id, name, status, total, sent_count, failed_count, is_html, min_delay, max_delay, created_at, finished_at,
+              paused_by, pause_reason, bounce_alert_sent_at, bounce_alert_error
        FROM campaigns WHERE id=$1 AND user_id=$2`,
       [req.params.id, req.user.id]
     );
     if (c.rows.length === 0) return res.json({ ok: false, message: "Campaign not found." });
-    const recent = await pool.query(
-      `SELECT email, status, from_addr, subject, error, sent_at FROM campaign_recipients
-       WHERE campaign_id=$1 AND status <> 'pending' ORDER BY sent_at DESC NULLS LAST, id DESC LIMIT 100`,
-      [req.params.id]
-    );
-    res.json({ ok: true, campaign: c.rows[0], recent: recent.rows });
+    const [stats, monitoring, recent, settings] = await Promise.all([
+      campaignReport.getStats(req.params.id),
+      campaignReport.getMonitoring(c.rows[0]),
+      campaignReport.listRecipients(req.params.id, req.query.filter || "all", req.query.limit || 100),
+      bounceGuard.getUserSettings(req.user.id),
+    ]);
+    res.json({
+      ok: true, campaign: c.rows[0], stats, monitoring, recent: recent.filter(r => r.status !== "pending" || req.query.filter === "pending"),
+      rule: { enabled: settings.bounce_pause_enabled, threshold: settings.bounce_threshold, mode: settings.bounce_mode },
+    });
+  } catch (err) {
+    res.json({ ok: false, message: err.message });
+  }
+});
+
+// ─── CAMPAIGNS: Download report (.xlsx) ───────────────────────────────────────
+// Works for any status; for a campaign that is still running it is a progress report.
+app.get("/api/campaigns/:id/report", authMiddleware, async (req, res) => {
+  try {
+    const c = await pool.query("SELECT * FROM campaigns WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    if (c.rows.length === 0) return res.status(404).json({ ok: false, message: "Campaign not found." });
+    const { buffer, filename } = await campaignReport.buildReport(c.rows[0]);
+    res.set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.set("Content-Disposition", `attachment; filename="${filename}"`);
+    res.send(buffer);
+  } catch (err) {
+    res.status(500).json({ ok: false, message: err.message });
+  }
+});
+
+// ─── CAMPAIGNS: Check for bounces right now ───────────────────────────────────
+app.post("/api/campaigns/:id/check-bounces", authMiddleware, async (req, res) => {
+  try {
+    const c = await pool.query("SELECT id FROM campaigns WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    if (c.rows.length === 0) return res.json({ ok: false, message: "Campaign not found." });
+    const r = await bounceScanner.scan(Number(req.params.id));
+    if (r.mailboxes === 0) return res.json({ ok: false, message: "No sending mailbox found for this campaign." });
+    const err = r.errors.length ? ` Problem: ${r.errors[0]}` : "";
+    res.json({ ok: r.errors.length === 0, message: `Checked ${r.mailboxes} mailbox(es) — ${r.bounces} new bounce(s) found.${err}`, result: r });
   } catch (err) {
     res.json({ ok: false, message: err.message });
   }
@@ -594,7 +649,7 @@ app.get("/api/campaigns/:id", authMiddleware, async (req, res) => {
 // ─── CAMPAIGNS: Pause ─────────────────────────────────────────────────────────
 app.post("/api/campaigns/:id/pause", authMiddleware, async (req, res) => {
   try {
-    const r = await pool.query("UPDATE campaigns SET status='paused' WHERE id=$1 AND user_id=$2 AND status='running' RETURNING id", [req.params.id, req.user.id]);
+    const r = await pool.query("UPDATE campaigns SET status='paused', paused_by='user', pause_reason=NULL WHERE id=$1 AND user_id=$2 AND status='running' RETURNING id", [req.params.id, req.user.id]);
     if (r.rows.length === 0) return res.json({ ok: false, message: "Campaign is not running." });
     campaignRunner.signalPause(req.params.id);
     res.json({ ok: true, message: "Campaign paused." });
@@ -606,7 +661,7 @@ app.post("/api/campaigns/:id/pause", authMiddleware, async (req, res) => {
 // ─── CAMPAIGNS: Resume ────────────────────────────────────────────────────────
 app.post("/api/campaigns/:id/resume", authMiddleware, async (req, res) => {
   try {
-    const r = await pool.query("UPDATE campaigns SET status='running' WHERE id=$1 AND user_id=$2 AND status='paused' RETURNING id", [req.params.id, req.user.id]);
+    const r = await pool.query("UPDATE campaigns SET status='running', paused_by=NULL, pause_reason=NULL, bounce_reset_at=NOW(), bounce_alert_error=NULL WHERE id=$1 AND user_id=$2 AND status='paused' RETURNING id", [req.params.id, req.user.id]);
     if (r.rows.length === 0) return res.json({ ok: false, message: "Campaign is not paused." });
     campaignRunner.startCampaign(req.params.id);
     res.json({ ok: true, message: "Campaign resumed." });
@@ -703,8 +758,8 @@ app.post("/api/subject-groups/:id/items", authMiddleware, async (req, res) => {
   if (g.rows.length === 0) return res.json({ ok: false, message: "Subject group not found." });
   try {
     const count = await pool.query("SELECT COUNT(*) FROM subject_items WHERE group_id=$1", [req.params.id]);
-    if (parseInt(count.rows[0].count) >= 20)
-      return res.json({ ok: false, message: "Maximum 20 subjects per group." });
+    if (parseInt(count.rows[0].count) >= MAX_GROUP_ITEMS)
+      return res.json({ ok: false, message: `Maximum ${MAX_GROUP_ITEMS} subjects per group.` });
     const result = await pool.query(
       "INSERT INTO subject_items (group_id, subject, sort_order) VALUES ($1,$2,$3) RETURNING *",
       [req.params.id, subject.trim(), parseInt(count.rows[0].count)]
@@ -801,8 +856,8 @@ app.post("/api/body-groups/:id/items", authMiddleware, async (req, res) => {
   if (g.rows.length === 0) return res.json({ ok: false, message: "Body group not found." });
   try {
     const count = await pool.query("SELECT COUNT(*) FROM body_items WHERE group_id=$1", [req.params.id]);
-    if (parseInt(count.rows[0].count) >= 20)
-      return res.json({ ok: false, message: "Maximum 20 bodies per group." });
+    if (parseInt(count.rows[0].count) >= MAX_GROUP_ITEMS)
+      return res.json({ ok: false, message: `Maximum ${MAX_GROUP_ITEMS} bodies per group.` });
     const result = await pool.query(
       "INSERT INTO body_items (group_id, body, is_html, sort_order) VALUES ($1,$2,$3,$4) RETURNING *",
       [req.params.id, body, isHtml === true || isHtml === "true", parseInt(count.rows[0].count)]
@@ -1297,6 +1352,130 @@ app.post("/api/verify/batches/:id/deep-check/stop", authMiddleware, async (req, 
   }
 });
 
+// ─── GREETING & SIGNATURE GROUPS ──────────────────────────────────────────────
+// Same shape as Subject/Body groups: a named pool of up to MAX_GROUP_ITEMS
+// texts; one is picked at random per recipient.
+function registerTextGroups({ base, groupTable, itemTable, noun }) {
+  const cap = noun[0].toUpperCase() + noun.slice(1);
+
+  app.post(`/api/${base}`, authMiddleware, async (req, res) => {
+    const { name, description } = req.body;
+    if (!name) return res.json({ ok: false, message: "Group name is required." });
+    try {
+      const r = await pool.query(`INSERT INTO ${groupTable} (user_id, name, description) VALUES ($1,$2,$3) RETURNING *`, [req.user.id, name.trim(), description || ""]);
+      res.json({ ok: true, group: r.rows[0], message: `${cap} group created.` });
+    } catch (err) { res.json({ ok: false, message: err.message }); }
+  });
+
+  app.get(`/api/${base}`, authMiddleware, async (req, res) => {
+    try {
+      const r = await pool.query(`
+        SELECT g.*, COUNT(i.id)::int AS item_count FROM ${groupTable} g
+        LEFT JOIN ${itemTable} i ON i.group_id = g.id
+        WHERE g.user_id = $1 GROUP BY g.id ORDER BY g.created_at DESC`, [req.user.id]);
+      res.json({ ok: true, groups: r.rows });
+    } catch (err) { res.json({ ok: false, message: err.message }); }
+  });
+
+  app.get(`/api/${base}/:id`, authMiddleware, async (req, res) => {
+    try {
+      const g = await pool.query(`SELECT * FROM ${groupTable} WHERE id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
+      if (g.rows.length === 0) return res.json({ ok: false, message: `${cap} group not found.` });
+      const items = await pool.query(`SELECT * FROM ${itemTable} WHERE group_id=$1 ORDER BY sort_order ASC, created_at ASC`, [req.params.id]);
+      res.json({ ok: true, group: g.rows[0], items: items.rows });
+    } catch (err) { res.json({ ok: false, message: err.message }); }
+  });
+
+  app.delete(`/api/${base}/:id`, authMiddleware, async (req, res) => {
+    try {
+      await pool.query(`DELETE FROM ${groupTable} WHERE id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
+      res.json({ ok: true, message: `${cap} group deleted.` });
+    } catch (err) { res.json({ ok: false, message: err.message }); }
+  });
+
+  app.post(`/api/${base}/:id/items`, authMiddleware, async (req, res) => {
+    const { body, isHtml } = req.body;
+    if (!body || !body.trim()) return res.json({ ok: false, message: `${cap} text is required.` });
+    const g = await pool.query(`SELECT id FROM ${groupTable} WHERE id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
+    if (g.rows.length === 0) return res.json({ ok: false, message: `${cap} group not found.` });
+    try {
+      const count = await pool.query(`SELECT COUNT(*) FROM ${itemTable} WHERE group_id=$1`, [req.params.id]);
+      const n = parseInt(count.rows[0].count);
+      if (n >= MAX_GROUP_ITEMS) return res.json({ ok: false, message: `Maximum ${MAX_GROUP_ITEMS} ${noun}s per group.` });
+      const r = await pool.query(`INSERT INTO ${itemTable} (group_id, body, is_html, sort_order) VALUES ($1,$2,$3,$4) RETURNING *`,
+        [req.params.id, body, isHtml === true || isHtml === "true", n]);
+      res.json({ ok: true, item: r.rows[0], message: `${cap} added.` });
+    } catch (err) { res.json({ ok: false, message: err.message }); }
+  });
+
+  app.put(`/api/${base}/:id/items/:itemId`, authMiddleware, async (req, res) => {
+    const { body, isHtml } = req.body;
+    if (!body || !body.trim()) return res.json({ ok: false, message: `${cap} text is required.` });
+    try {
+      await pool.query(
+        `UPDATE ${itemTable} SET body=$1, is_html=$2 WHERE id=$3 AND group_id IN (SELECT id FROM ${groupTable} WHERE id=$4 AND user_id=$5)`,
+        [body, isHtml === true || isHtml === "true", req.params.itemId, req.params.id, req.user.id]);
+      res.json({ ok: true, message: `${cap} updated.` });
+    } catch (err) { res.json({ ok: false, message: err.message }); }
+  });
+
+  app.delete(`/api/${base}/:id/items/:itemId`, authMiddleware, async (req, res) => {
+    try {
+      await pool.query(
+        `DELETE FROM ${itemTable} WHERE id=$1 AND group_id IN (SELECT id FROM ${groupTable} WHERE id=$2 AND user_id=$3)`,
+        [req.params.itemId, req.params.id, req.user.id]);
+      res.json({ ok: true, message: `${cap} deleted.` });
+    } catch (err) { res.json({ ok: false, message: err.message }); }
+  });
+}
+registerTextGroups({ base: "greeting-groups",  groupTable: "greeting_groups",  itemTable: "greeting_items",  noun: "greeting" });
+registerTextGroups({ base: "signature-groups", groupTable: "signature_groups", itemTable: "signature_items", noun: "signature" });
+
+// ─── SETTINGS: bounce rule + alert e-mail ─────────────────────────────────────
+function cleanSettings(b) {
+  const threshold = Math.min(50, Math.max(2, parseInt(b.bounce_threshold, 10) || DEFAULT_SETTINGS.bounce_threshold));
+  return {
+    bounce_pause_enabled: b.bounce_pause_enabled === true || b.bounce_pause_enabled === "true",
+    bounce_threshold: threshold,
+    bounce_mode: ["domain", "sender", "both"].includes(b.bounce_mode) ? b.bounce_mode : DEFAULT_SETTINGS.bounce_mode,
+    alert_enabled: b.alert_enabled === true || b.alert_enabled === "true",
+    alert_to: String(b.alert_to || "").trim(),
+    alert_subject: String(b.alert_subject || "").trim() || DEFAULT_SETTINGS.alert_subject,
+    alert_body: String(b.alert_body || "").trim() || DEFAULT_SETTINGS.alert_body,
+  };
+}
+
+app.get("/api/settings", authMiddleware, async (req, res) => {
+  try {
+    const settings = await bounceGuard.getUserSettings(req.user.id);
+    const u = await pool.query("SELECT email FROM users WHERE id=$1", [req.user.id]);
+    res.json({ ok: true, settings, accountEmail: u.rows[0] ? u.rows[0].email : "", defaults: DEFAULT_SETTINGS });
+  } catch (err) { res.json({ ok: false, message: err.message }); }
+});
+
+app.put("/api/settings", authMiddleware, async (req, res) => {
+  try {
+    const v = cleanSettings(req.body || {});
+    if (v.alert_to && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.alert_to))
+      return res.json({ ok: false, message: "Alert e-mail address is not valid." });
+    await pool.query(
+      `INSERT INTO user_settings (user_id, bounce_pause_enabled, bounce_threshold, bounce_mode, alert_enabled, alert_to, alert_subject, alert_body, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+       ON CONFLICT (user_id) DO UPDATE SET bounce_pause_enabled=$2, bounce_threshold=$3, bounce_mode=$4, alert_enabled=$5,
+         alert_to=$6, alert_subject=$7, alert_body=$8, updated_at=NOW()`,
+      [req.user.id, v.bounce_pause_enabled, v.bounce_threshold, v.bounce_mode, v.alert_enabled, v.alert_to || null, v.alert_subject, v.alert_body]
+    );
+    res.json({ ok: true, message: "Settings saved.", settings: v });
+  } catch (err) { res.json({ ok: false, message: err.message }); }
+});
+
+app.post("/api/settings/test-alert", authMiddleware, async (req, res) => {
+  try {
+    const to = await bounceGuard.sendTestAlert(req.user.id, publicBaseUrl(req), cleanSettings(req.body || {}));
+    res.json({ ok: true, message: `Test alert sent to ${to}.` });
+  } catch (err) { res.json({ ok: false, message: `Could not send test alert: ${err.message}` }); }
+});
+
 // ─── SPA Fallback — MUST BE LAST ─────────────────────────────────────────────
 app.get("*", (req, res) => {
   const index = path.join(frontendPath, "index.html");
@@ -1308,6 +1487,7 @@ initDB().then(() => {
   app.listen(PORT, "0.0.0.0", () => console.log(`✉  MailBlast running → http://localhost:${PORT}`));
   // Resume any campaigns / verification batches that were mid-run when the server last stopped.
   campaignRunner.resumeAll();
+  bounceScanner.start();
   emailVerifier.resumeAll();
   deepVerifier.resumeAll();
 }).catch(err => {

@@ -249,6 +249,100 @@ async function initDB() {
     ALTER TABLE verify_batches ADD COLUMN IF NOT EXISTS deep_deliverable INTEGER DEFAULT 0;
     ALTER TABLE verify_batches ADD COLUMN IF NOT EXISTS deep_undeliverable INTEGER DEFAULT 0;
     ALTER TABLE verify_batches ADD COLUMN IF NOT EXISTS deep_unknown INTEGER DEFAULT 0;
+
+    -- ── v5: Greetings & Signatures (same pool pattern as subjects/bodies) ──────
+    CREATE TABLE IF NOT EXISTS greeting_groups (
+      id          SERIAL PRIMARY KEY,
+      user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      name        VARCHAR(100) NOT NULL,
+      description VARCHAR(255),
+      created_at  TIMESTAMP DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS greeting_items (
+      id          SERIAL PRIMARY KEY,
+      group_id    INTEGER REFERENCES greeting_groups(id) ON DELETE CASCADE,
+      body        TEXT NOT NULL,
+      is_html     BOOLEAN DEFAULT FALSE,
+      sort_order  INTEGER DEFAULT 0,
+      created_at  TIMESTAMP DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS signature_groups (
+      id          SERIAL PRIMARY KEY,
+      user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      name        VARCHAR(100) NOT NULL,
+      description VARCHAR(255),
+      created_at  TIMESTAMP DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS signature_items (
+      id          SERIAL PRIMARY KEY,
+      group_id    INTEGER REFERENCES signature_groups(id) ON DELETE CASCADE,
+      body        TEXT NOT NULL,
+      is_html     BOOLEAN DEFAULT FALSE,
+      sort_order  INTEGER DEFAULT 0,
+      created_at  TIMESTAMP DEFAULT NOW()
+    );
+
+    ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS greeting            TEXT;
+    ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS greeting_is_html    BOOLEAN DEFAULT FALSE;
+    ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS greeting_group_id   INTEGER;
+    ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS signature           TEXT;
+    ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS signature_is_html   BOOLEAN DEFAULT FALSE;
+    ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS signature_group_id  INTEGER;
+
+    -- ── v5: Bounce handling ────────────────────────────────────────────────────
+    -- Why a campaign is paused (paused_by = 'bounce' when auto-paused) and the
+    -- cut-off used so a resumed campaign doesn't instantly re-trigger on the
+    -- same old bounces.
+    ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS paused_by            VARCHAR(20);
+    ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS pause_reason         TEXT;
+    ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS bounce_reset_at      TIMESTAMP;
+    ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS bounce_alert_sent_at TIMESTAMP;
+    ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS bounce_alert_error   TEXT;
+    -- Optional IMAP host override used to read bounce notices for the sender.
+    ALTER TABLE campaigns       ADD COLUMN IF NOT EXISTS imap_host VARCHAR(100);
+    ALTER TABLE sender_accounts ADD COLUMN IF NOT EXISTS imap_host VARCHAR(100);
+    ALTER TABLE smtp_settings   ADD COLUMN IF NOT EXISTS imap_host VARCHAR(100);
+
+    -- Per-recipient delivery evidence.
+    ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS tracking_id   VARCHAR(64);
+    ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS message_id    VARCHAR(255);
+    ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS smtp_response TEXT;
+    -- bounce_source: 'smtp' = refused by the mail server during sending,
+    --                'dsn'  = a bounce notice arrived later in the sender mailbox.
+    ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS bounce_type   VARCHAR(20);
+    ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS bounce_source VARCHAR(10);
+    ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS bounce_code   VARCHAR(20);
+    ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS bounce_reason TEXT;
+    ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS bounce_detail TEXT;
+    ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS bounced_at    TIMESTAMP;
+    CREATE INDEX IF NOT EXISTS idx_camp_recipients_tracking ON campaign_recipients(tracking_id);
+    CREATE INDEX IF NOT EXISTS idx_camp_recipients_bounce   ON campaign_recipients(campaign_id, bounce_type);
+
+    -- Bounce-mailbox scanner state: one row per sender mailbox we read over IMAP.
+    CREATE TABLE IF NOT EXISTS mailbox_scan_state (
+      id            SERIAL PRIMARY KEY,
+      username      VARCHAR(190) NOT NULL,
+      host          VARCHAR(190) NOT NULL,
+      folder        VARCHAR(100) NOT NULL DEFAULT 'INBOX',
+      uid_validity  VARCHAR(40),
+      last_uid      BIGINT DEFAULT 0,
+      last_scan_at  TIMESTAMP,
+      last_error    TEXT,
+      UNIQUE (username, host, folder)
+    );
+
+    -- Per-user settings: bounce auto-pause rule + the alert e-mail template.
+    CREATE TABLE IF NOT EXISTS user_settings (
+      user_id               INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      bounce_pause_enabled  BOOLEAN DEFAULT TRUE,
+      bounce_threshold      INTEGER DEFAULT 3,
+      bounce_mode           VARCHAR(10) DEFAULT 'both',
+      alert_enabled         BOOLEAN DEFAULT TRUE,
+      alert_to              VARCHAR(255),
+      alert_subject         TEXT,
+      alert_body            TEXT,
+      updated_at            TIMESTAMP DEFAULT NOW()
+    );
   `);
   console.log("✅ Database tables ready");
 }
