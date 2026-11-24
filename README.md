@@ -236,6 +236,20 @@ Optional env vars: `ALERT_SMTP_HOST/PORT/USER/PASS` (dedicated alert sender), `B
 **Upgrading:** run `npm install --prefix backend` (adds `imapflow`, `mailparser`) and rebuild the frontend. Database
 changes apply automatically on start. The Node process must stay running for bounce checks to happen.
 
+### Sending through Amazon SES
+SES works as an ordinary SMTP account — enter it on Compose or in a Sender Group:
+
+| Field | Value |
+|---|---|
+| Host | `email-smtp.<your-region>.amazonaws.com` (e.g. `email-smtp.ap-southeast-2.amazonaws.com`) |
+| Port | `587` |
+| Username / Password | the **SES SMTP credentials** (not your AWS login or access keys) |
+| **From Email** | an address on a domain verified in SES, e.g. `hello@yourdomain.com` |
+
+*From Email* is the address recipients see; leave it empty for normal mailboxes (the username is used, as before).
+SES has no mailbox to read, so bounces that arrive *after* sending are not visible: those emails show as
+"Accepted (bounce check unavailable)", while refusals at send time are reported as bounced.
+
 ---
 
 ## License

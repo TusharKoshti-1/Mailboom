@@ -223,6 +223,7 @@ function SenderGroupsPage({ authHeader }) {
   const [accPass,  setAccPass]  = useState("");
   const [accName,  setAccName]  = useState("");
   const [accImap,  setAccImap]  = useState("");
+  const [accFrom,  setAccFrom]  = useState("");
   const [adding,   setAdding]   = useState(false);
   const [testingId, setTestingId] = useState(null);
 
@@ -274,12 +275,12 @@ function SenderGroupsPage({ authHeader }) {
     try {
       const res  = await fetch(`/api/sender-groups/${activeGroup.id}/accounts`, {
         method:"POST", headers:{ ...authHeader, "Content-Type":"application/json" },
-        body: JSON.stringify({ host:accHost, port:accPort, username:accUser, password:accPass, fromName:accName, imapHost:accImap }),
+        body: JSON.stringify({ host:accHost, port:accPort, username:accUser, password:accPass, fromName:accName, imapHost:accImap, fromEmail:accFrom }),
       });
       const data = await res.json();
       if (data.ok) {
         showMsg("success", data.message);
-        setAccUser(""); setAccPass(""); setAccName(""); setAccImap("");
+        setAccUser(""); setAccPass(""); setAccName(""); setAccImap(""); setAccFrom("");
         loadGroup(activeGroup);
       } else showMsg("error", data.message);
     } catch { showMsg("error", "Failed to add account."); }
@@ -427,6 +428,10 @@ function SenderGroupsPage({ authHeader }) {
               <TextInput label="Email (Username)" value={accUser} onChange={setAccUser} placeholder="info@yourdomain.com"/>
               <TextInput label="Password" type="password" value={accPass} onChange={setAccPass} placeholder="Email password"/>
               <TextInput label="Display Name (optional)" value={accName} onChange={setAccName} placeholder="Company Name" mono={false}/>
+              <TextInput label="From Email (optional)" value={accFrom} onChange={setAccFrom} placeholder="e.g. hello@yourdomain.com"/>
+              <div style={{ fontSize:10.5, color:"var(--text3)", marginTop:-8, marginBottom:12, lineHeight:1.5 }}>
+                The address recipients see. Leave blank to use the username. <b>Required for Amazon SES.</b>
+              </div>
               <TextInput label="IMAP Host (optional)" value={accImap} onChange={setAccImap} placeholder="auto-detected, e.g. imap.hostinger.com"/>
               <div style={{ fontSize:10.5, color:"var(--text3)", marginTop:-8, marginBottom:12, lineHeight:1.5 }}>
                 Lets MailBlast read bounce notices from this mailbox. Leave blank to auto-detect from the SMTP host.
@@ -456,8 +461,8 @@ function SenderGroupsPage({ authHeader }) {
                         <AtSign size={14} color="var(--green)"/>
                       </div>
                       <div style={{ flex:1, minWidth:0 }}>
-                        <div style={{ fontSize:13, fontWeight:600, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{a.username}</div>
-                        <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"var(--font-mono)" }}>{a.host}:{a.port}{a.from_name ? ` · ${a.from_name}` : ""}</div>
+                        <div style={{ fontSize:13, fontWeight:600, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{a.from_email || a.username}</div>
+                        <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"var(--font-mono)" }}>{a.host}:{a.port}{a.from_email ? ` · login ${a.username.slice(0,6)}…` : ""}{a.from_name ? ` · ${a.from_name}` : ""}</div>
                       </div>
                       <div style={{ display:"flex", gap:6 }}>
                         <button onClick={() => handleTestAccount(a.id)} disabled={testingId === a.id}
@@ -798,6 +803,7 @@ function ComposePage({ authHeader }) {
   const [useAttachmentGroup, setUseAttachmentGroup] = useState(false);
 
   const [imapHost, setImapHost] = useState(""); // optional — where bounce notices are read from
+  const [fromEmail, setFromEmail] = useState(""); // optional — visible From address (needed for Amazon SES)
 
   const [to,       setTo]       = useState("");
   const [subject,  setSubject]  = useState("");
@@ -829,6 +835,7 @@ function ComposePage({ authHeader }) {
           setSmtpPass(s.password || "");
           setFromName(s.from_name || "");
           setImapHost(s.imap_host || "");
+          setFromEmail(s.from_email || "");
           setSmtpSaved(true);
           const match = Object.entries(PRESETS).find(([, p]) => p.host === s.host);
           setPreset(match ? match[0] : "custom");
@@ -872,7 +879,7 @@ function ComposePage({ authHeader }) {
     if (!smtpHost || !smtpUser || !smtpPass) return addLog("error", "❌ Fill in SMTP details first.");
     setSaving(true);
     try {
-      const res  = await fetch("/api/smtp/save", { method:"POST", headers:{ ...authHeader, "Content-Type":"application/json" }, body:JSON.stringify({ host:smtpHost, port:smtpPort, username:smtpUser, password:smtpPass, fromName, imapHost }) });
+      const res  = await fetch("/api/smtp/save", { method:"POST", headers:{ ...authHeader, "Content-Type":"application/json" }, body:JSON.stringify({ host:smtpHost, port:smtpPort, username:smtpUser, password:smtpPass, fromName, imapHost, fromEmail }) });
       const data = await res.json();
       if (data.ok) { setSmtpSaved(true); addLog("success", "✅ SMTP settings saved."); }
       else addLog("error", `❌ ${data.message}`);
@@ -936,6 +943,7 @@ function ComposePage({ authHeader }) {
       fd.append("isHtml", isHtml ? "true" : "false");
     }
     if (!useSenderGroup && imapHost.trim()) fd.append("imapHost", imapHost.trim());
+    if (!useSenderGroup && fromEmail.trim()) fd.append("fromEmail", fromEmail.trim());
     fd.append("name", subject || "Campaign");
     fd.append("minDelay", min);    fd.append("maxDelay", max);
     if (useAttachmentGroup && attachmentGroupId) {
@@ -1015,6 +1023,10 @@ function ComposePage({ authHeader }) {
             </div>
             <TextInput label="Username" value={smtpUser} onChange={setSmtpUser} placeholder="you@domain.com"/>
             <TextInput label="Password" type="password" value={smtpPass} onChange={setSmtpPass} placeholder="Password"/>
+            <TextInput label="From Email (optional)" value={fromEmail} onChange={setFromEmail} placeholder="e.g. hello@yourdomain.com"/>
+            <div style={{ fontSize:10.5, color:"var(--text3)", marginTop:-8, marginBottom:12, lineHeight:1.5 }}>
+              The address recipients see. Leave blank to use the username. <b>Required for Amazon SES</b>, whose username is an access key.
+            </div>
             <TextInput label="IMAP Host (optional)" value={imapHost} onChange={setImapHost} placeholder="auto-detected, e.g. imap.hostinger.com"/>
             <div style={{ fontSize:10.5, color:"var(--text3)", marginTop:-8, marginBottom:12, lineHeight:1.5 }}>
               Used to read bounce notices from this mailbox so the report can tell you which emails really bounced.

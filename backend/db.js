@@ -264,6 +264,12 @@ async function initDB() {
     ALTER TABLE sender_accounts ADD COLUMN IF NOT EXISTS imap_host VARCHAR(100);
     ALTER TABLE smtp_settings   ADD COLUMN IF NOT EXISTS imap_host VARCHAR(100);
 
+    -- Visible From address, when it differs from the SMTP login (e.g. Amazon SES,
+    -- whose SMTP username is an access key, not an email address).
+    ALTER TABLE smtp_settings   ADD COLUMN IF NOT EXISTS from_email VARCHAR(255);
+    ALTER TABLE sender_accounts ADD COLUMN IF NOT EXISTS from_email VARCHAR(255);
+    ALTER TABLE campaigns       ADD COLUMN IF NOT EXISTS from_email VARCHAR(255);
+
     -- Per-recipient delivery evidence.
     ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS tracking_id   VARCHAR(64);
     ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS message_id    VARCHAR(255);

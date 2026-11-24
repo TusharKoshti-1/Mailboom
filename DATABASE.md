@@ -119,3 +119,5 @@ WHERE s.user_id = 1;
 - `campaigns` + `paused_by`, `pause_reason`, `bounce_reset_at`, `bounce_alert_*`, `imap_host`.
 - `campaign_recipients` + `tracking_id`, `message_id`, `smtp_response`, `bounce_type/source/code/reason/detail`, `bounced_at`.
 - `sender_accounts.imap_host`, `smtp_settings.imap_host`.
+
+- `smtp_settings.from_email`, `sender_accounts.from_email`, `campaigns.from_email` — visible From address when it differs from the SMTP login (Amazon SES).

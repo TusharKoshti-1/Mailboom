@@ -134,15 +134,15 @@ async function resolveAlertSmtp(campaign, avoidUsername) {
   if (process.env.ALERT_SMTP_HOST && process.env.ALERT_SMTP_USER && process.env.ALERT_SMTP_PASS) {
     return { host: process.env.ALERT_SMTP_HOST, port: process.env.ALERT_SMTP_PORT || 587,
              username: process.env.ALERT_SMTP_USER, password: process.env.ALERT_SMTP_PASS,
-             from_name: process.env.ALERT_FROM_NAME || "MailBlast Alerts" };
+             from_name: process.env.ALERT_FROM_NAME || "MailBlast Alerts", from_email: process.env.ALERT_FROM_EMAIL || null };
   }
   if (campaign.sender_group_id) {
     const r = await pool.query("SELECT * FROM sender_accounts WHERE group_id=$1 ORDER BY id ASC", [campaign.sender_group_id]);
-    const others = r.rows.filter(a => !avoidUsername || a.username.toLowerCase() !== String(avoidUsername).toLowerCase());
+    const others = r.rows.filter(a => !avoidUsername || (a.from_email || a.username).toLowerCase() !== String(avoidUsername).toLowerCase());
     return (others[0] || r.rows[0]) || null;
   }
   if (campaign.smtp_host) {
-    return { host: campaign.smtp_host, port: campaign.smtp_port, username: campaign.smtp_user, password: campaign.smtp_pass, from_name: campaign.from_name };
+    return { host: campaign.smtp_host, port: campaign.smtp_port, username: campaign.smtp_user, password: campaign.smtp_pass, from_name: campaign.from_name, from_email: campaign.from_email };
   }
   return null;
 }
@@ -176,7 +176,8 @@ async function sendAlert(campaign, settings, trigger) {
   if (!smtp) throw new Error("No SMTP account available to send the alert");
 
   const vars = buildVars({ user, campaign, trigger, settings });
-  const from = smtp.from_name ? `"${smtp.from_name}" <${smtp.username}>` : smtp.username;
+  const fromAddr = smtp.from_email || smtp.username;
+  const from = smtp.from_name ? `"${smtp.from_name}" <${fromAddr}>` : fromAddr;
   const t = transportFor(smtp);
   try {
     await t.sendMail({
@@ -199,7 +200,7 @@ async function sendTestAlert(userId, baseUrl, overrideSettings) {
   const to = (settings.alert_to || "").trim() || user.email;
 
   let smtp = null;
-  const s = await pool.query("SELECT host, port, username, password, from_name FROM smtp_settings WHERE user_id=$1", [userId]);
+  const s = await pool.query("SELECT host, port, username, password, from_name, from_email FROM smtp_settings WHERE user_id=$1", [userId]);
   if (s.rows[0]) smtp = s.rows[0];
   if (!smtp) {
     const a = await pool.query(
@@ -214,7 +215,8 @@ async function sendTestAlert(userId, baseUrl, overrideSettings) {
     emails: Array.from({ length: settings.bounce_threshold }, (_, i) => `person${i + 1}@example.com`),
     lastReason: "Mailbox does not exist", lastCode: "5.1.1" };
   const vars = buildVars({ user, campaign: fake, trigger, settings });
-  const from = smtp.from_name ? `"${smtp.from_name}" <${smtp.username}>` : smtp.username;
+  const fromAddr = smtp.from_email || smtp.username;
+  const from = smtp.from_name ? `"${smtp.from_name}" <${fromAddr}>` : fromAddr;
   const t = transportFor(smtp);
   try {
     await t.sendMail({

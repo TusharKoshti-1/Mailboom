@@ -148,7 +148,7 @@ async function runLoop(campaignId) {
     // else (subject/body/attachment groups) stays random as before.
     const sender = senderAccounts
       ? senderAccounts[processed % senderAccounts.length]
-      : { host: c.smtp_host, port: c.smtp_port, username: c.smtp_user, password: c.smtp_pass, from_name: c.from_name };
+      : { host: c.smtp_host, port: c.smtp_port, username: c.smtp_user, password: c.smtp_pass, from_name: c.from_name, from_email: c.from_email };
 
     const emailSubject = renderTokens(subjectItems ? pickRandom(subjectItems).subject : (c.subject || ""), r.email);
     let emailBody, emailIsHtml;
@@ -158,7 +158,8 @@ async function runLoop(campaignId) {
     // Body with {{email}} / {{domain}} filled in.
     const msg = assembleMessage([{ text: renderTokens(emailBody, r.email), isHtml: emailIsHtml }]);
 
-    const fromAddr = (sender.username || "").trim();
+    // Visible From address: the explicit From email if set (needed for Amazon SES), otherwise the SMTP login.
+    const fromAddr = (sender.from_email || sender.username || "").trim();
     const fromFull = sender.from_name ? `"${sender.from_name}" <${fromAddr}>` : fromAddr;
 
     const trackingId = crypto.randomUUID();

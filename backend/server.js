@@ -175,22 +175,33 @@ app.get("/api/auth/me", authMiddleware, async (req, res) => {
   }
 });
 
+// Optional visible From address. Empty = use the SMTP username (existing behaviour).
+const EMAIL_RE = /^[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+$/;
+function cleanFromEmail(v) {
+  const t = String(v || "").trim();
+  if (!t) return { value: null };
+  if (!EMAIL_RE.test(t)) return { error: "From email is not a valid email address." };
+  return { value: t };
+}
+
 // ─── SMTP: Save ───────────────────────────────────────────────────────────────
 app.post("/api/smtp/save", authMiddleware, async (req, res) => {
-  const { host, port, username, password, fromName, imapHost } = req.body;
+  const { host, port, username, password, fromName, imapHost, fromEmail } = req.body;
   if (!host || !username || !password)
     return res.json({ ok: false, message: "Host, username and password are required." });
+  const fe = cleanFromEmail(fromEmail);
+  if (fe.error) return res.json({ ok: false, message: fe.error });
   try {
     const exists = await pool.query("SELECT id FROM smtp_settings WHERE user_id = $1", [req.user.id]);
     if (exists.rows.length > 0) {
       await pool.query(
-        "UPDATE smtp_settings SET host=$1, port=$2, username=$3, password=$4, from_name=$5, imap_host=$6, updated_at=NOW() WHERE user_id=$7",
-        [host, port || 587, username, password, fromName || "", (imapHost || "").trim() || null, req.user.id]
+        "UPDATE smtp_settings SET host=$1, port=$2, username=$3, password=$4, from_name=$5, imap_host=$6, from_email=$7, updated_at=NOW() WHERE user_id=$8",
+        [host, port || 587, username, password, fromName || "", (imapHost || "").trim() || null, fe.value, req.user.id]
       );
     } else {
       await pool.query(
-        "INSERT INTO smtp_settings (user_id, host, port, username, password, from_name, imap_host) VALUES ($1,$2,$3,$4,$5,$6,$7)",
-        [req.user.id, host, port || 587, username, password, fromName || "", (imapHost || "").trim() || null]
+        "INSERT INTO smtp_settings (user_id, host, port, username, password, from_name, imap_host, from_email) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+        [req.user.id, host, port || 587, username, password, fromName || "", (imapHost || "").trim() || null, fe.value]
       );
     }
     res.json({ ok: true, message: "SMTP settings saved." });
@@ -202,7 +213,7 @@ app.post("/api/smtp/save", authMiddleware, async (req, res) => {
 // ─── SMTP: Load ───────────────────────────────────────────────────────────────
 app.get("/api/smtp/load", authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query("SELECT host, port, username, password, from_name, imap_host FROM smtp_settings WHERE user_id = $1", [req.user.id]);
+    const result = await pool.query("SELECT host, port, username, password, from_name, imap_host, from_email FROM smtp_settings WHERE user_id = $1", [req.user.id]);
     res.json({ ok: true, smtp: result.rows.length > 0 ? result.rows[0] : null });
   } catch (err) {
     res.json({ ok: false, message: "Failed to load SMTP settings." });
@@ -403,7 +414,7 @@ app.get("/api/sender-groups/:id", authMiddleware, async (req, res) => {
   try {
     const g = await pool.query("SELECT * FROM sender_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
     if (g.rows.length === 0) return res.json({ ok: false, message: "Sender group not found." });
-    const a = await pool.query("SELECT id, host, port, username, from_name, imap_host, added_at FROM sender_accounts WHERE group_id=$1 ORDER BY added_at ASC", [req.params.id]);
+    const a = await pool.query("SELECT id, host, port, username, from_name, imap_host, from_email, added_at FROM sender_accounts WHERE group_id=$1 ORDER BY added_at ASC", [req.params.id]);
     res.json({ ok: true, group: g.rows[0], accounts: a.rows });
   } catch (err) {
     res.json({ ok: false, message: err.message });
@@ -422,9 +433,11 @@ app.delete("/api/sender-groups/:id", authMiddleware, async (req, res) => {
 
 // ─── SENDER GROUPS: Add account ───────────────────────────────────────────────
 app.post("/api/sender-groups/:id/accounts", authMiddleware, async (req, res) => {
-  const { host, port, username, password, fromName, imapHost } = req.body;
+  const { host, port, username, password, fromName, imapHost, fromEmail } = req.body;
   if (!host || !username || !password)
     return res.json({ ok: false, message: "Host, username and password are required." });
+  const fe = cleanFromEmail(fromEmail);
+  if (fe.error) return res.json({ ok: false, message: fe.error });
   const g = await pool.query("SELECT id FROM sender_groups WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
   if (g.rows.length === 0) return res.json({ ok: false, message: "Sender group not found." });
   try {
@@ -432,8 +445,8 @@ app.post("/api/sender-groups/:id/accounts", authMiddleware, async (req, res) => 
     const transporter = createTransporter({ host, port: port || 587, username, password });
     await transporter.verify();
     await pool.query(
-      "INSERT INTO sender_accounts (group_id, host, port, username, password, from_name, imap_host) VALUES ($1,$2,$3,$4,$5,$6,$7)",
-      [req.params.id, host, port || 587, username, password, fromName || "", (imapHost || "").trim() || null]
+      "INSERT INTO sender_accounts (group_id, host, port, username, password, from_name, imap_host, from_email) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+      [req.params.id, host, port || 587, username, password, fromName || "", (imapHost || "").trim() || null, fe.value]
     );
     res.json({ ok: true, message: `${username} added and verified.` });
   } catch (err) {
@@ -470,7 +483,7 @@ app.post("/api/sender-groups/:id/accounts/:accountId/test", authMiddleware, asyn
 
 // ─── CAMPAIGNS: Create & start (runs in the background) ───────────────────────
 app.post("/api/campaigns", authMiddleware, upload.array("attachments", 10), async (req, res) => {
-  const { smtpHost, smtpPort, smtpUser, smtpPass, fromName, to, subject, body, isHtml, minDelay, maxDelay, senderGroupId, subjectGroupId, bodyGroupId, attachmentGroupId, name, imapHost } = req.body;
+  const { smtpHost, smtpPort, smtpUser, smtpPass, fromName, to, subject, body, isHtml, minDelay, maxDelay, senderGroupId, subjectGroupId, bodyGroupId, attachmentGroupId, name, imapHost, fromEmail } = req.body;
 
   if (!to) return res.json({ ok: false, message: "Recipient (To) is required." });
 
@@ -504,6 +517,9 @@ app.post("/api/campaigns", authMiddleware, upload.array("attachments", 10), asyn
     if (ag.rows.length === 0) return res.json({ ok: false, message: "Attachment group has no files. Add attachments first." });
   }
 
+  const campaignFrom = cleanFromEmail(fromEmail);
+  if (campaignFrom.error) return res.json({ ok: false, message: campaignFrom.error });
+
   const recipients = parseRecipients(to);
   if (recipients.length === 0) return res.json({ ok: false, message: "No valid email addresses found." });
 
@@ -517,15 +533,16 @@ app.post("/api/campaigns", authMiddleware, upload.array("attachments", 10), asyn
     const ins = await pool.query(
       `INSERT INTO campaigns
          (user_id, name, status, total, subject, body, is_html, subject_group_id, body_group_id, sender_group_id,
-          smtp_host, smtp_port, smtp_user, smtp_pass, from_name, min_delay, max_delay, base_url, attachment_group_id, imap_host)
-       VALUES ($1,$2,'running',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING id`,
+          smtp_host, smtp_port, smtp_user, smtp_pass, from_name, min_delay, max_delay, base_url, attachment_group_id, imap_host, from_email)
+       VALUES ($1,$2,'running',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING id`,
       [req.user.id, campaignName, recipients.length,
        subjectGroupId ? null : subject, bodyGroupId ? null : body, useHtml,
        subjectGroupId || null, bodyGroupId || null, senderGroupId || null,
        senderGroupId ? null : smtpHost, senderGroupId ? null : (parseInt(smtpPort, 10) || 587),
        senderGroupId ? null : smtpUser, senderGroupId ? null : smtpPass, senderGroupId ? null : (fromName || ""),
        minS, maxS, baseUrl, attachmentGroupId || null,
-       senderGroupId ? null : ((imapHost || "").trim() || null)]
+       senderGroupId ? null : ((imapHost || "").trim() || null),
+       senderGroupId ? null : campaignFrom.value]
     );
     const campaignId = ins.rows[0].id;
 

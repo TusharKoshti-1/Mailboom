@@ -138,7 +138,7 @@ async function applyBounce(parsedMsg, mb) {
         WHERE campaign_id = ANY($1) AND lower(email)=$2 AND lower(from_addr)=$3
           AND status='sent' AND bounce_type IS NULL
         ORDER BY sent_at DESC NULLS LAST LIMIT 1`,
-      [campaignIds, addr, mb.username.toLowerCase()]
+      [campaignIds, addr, (mb.fromAddr || mb.username).toLowerCase()]
     );
     if (r.rows[0]) {
       const entry = failedEntries.find(e => e.recipient === addr) || null;
@@ -152,7 +152,7 @@ async function applyBounce(parsedMsg, mb) {
 // ── Scan state ────────────────────────────────────────────────────────────────
 async function getState(mb, folder) {
   const r = await pool.query("SELECT * FROM mailbox_scan_state WHERE username=$1 AND host=$2 AND folder=$3",
-    [mb.username.toLowerCase(), mb.host.toLowerCase(), folder]);
+    [(mb.fromAddr || mb.username).toLowerCase(), mb.host.toLowerCase(), folder]);
   return r.rows[0] || null;
 }
 async function saveState(mb, folder, { uidValidity, lastUid, error, scanned }) {
@@ -164,7 +164,7 @@ async function saveState(mb, folder, { uidValidity, lastUid, error, scanned }) {
        last_uid     = COALESCE(EXCLUDED.last_uid,     mailbox_scan_state.last_uid),
        last_scan_at = CASE WHEN $6::timestamp IS NULL THEN mailbox_scan_state.last_scan_at ELSE $6::timestamp END,
        last_error   = EXCLUDED.last_error`,
-    [mb.username.toLowerCase(), mb.host.toLowerCase(), folder,
+    [(mb.fromAddr || mb.username).toLowerCase(), mb.host.toLowerCase(), folder,
      uidValidity === undefined ? null : String(uidValidity),
      lastUid === undefined ? null : lastUid,
      scanned ? new Date() : null,
@@ -187,18 +187,19 @@ async function collectMailboxes(onlyCampaignId) {
 
   const map = new Map();
   const add = (campaign, acc) => {
-    const key = `${String(acc.host).toLowerCase()}|${String(acc.username).toLowerCase()}`;
-    if (!map.has(key)) map.set(key, { host: acc.host, username: acc.username, password: acc.password, imapHost: acc.imap_host || campaign.imap_host || null, campaignIds: new Set(), since: campaign.created_at });
+    const fromAddr = String(acc.from_email || acc.username || "").trim();
+    const key = `${String(acc.host).toLowerCase()}|${String(acc.username).toLowerCase()}|${fromAddr.toLowerCase()}`;
+    if (!map.has(key)) map.set(key, { host: acc.host, username: acc.username, fromAddr, password: acc.password, imapHost: acc.imap_host || campaign.imap_host || null, campaignIds: new Set(), since: campaign.created_at });
     const mb = map.get(key);
     mb.campaignIds.add(campaign.id);
     if (new Date(campaign.created_at) < new Date(mb.since)) mb.since = campaign.created_at;
   };
   for (const c of camps.rows) {
     if (c.sender_group_id) {
-      const a = await pool.query("SELECT host, username, password, imap_host FROM sender_accounts WHERE group_id=$1", [c.sender_group_id]);
+      const a = await pool.query("SELECT host, username, password, imap_host, from_email FROM sender_accounts WHERE group_id=$1", [c.sender_group_id]);
       a.rows.forEach(acc => add(c, acc));
     } else if (c.smtp_host && c.smtp_user) {
-      add(c, { host: c.smtp_host, username: c.smtp_user, password: c.smtp_pass, imap_host: c.imap_host });
+      add(c, { host: c.smtp_host, username: c.smtp_user, password: c.smtp_pass, imap_host: c.imap_host, from_email: c.from_email });
     }
   }
   return [...map.values()];
@@ -208,7 +209,7 @@ async function collectMailboxes(onlyCampaignId) {
 async function scanMailbox(mb, result) {
   const imapHost = deriveImapHost(mb.host, mb.imapHost);
   if (!imapHost) {
-    await saveState(mb, "INBOX", { error: "Bounce check unavailable: this provider has no mailbox to read (it reports bounces by webhook). Set an IMAP host if you have one." });
+    await saveState(mb, "INBOX", { error: "Bounce check unavailable: Amazon SES and similar relays have no mailbox to read, so a bounce that arrives after sending cannot be seen. Rejections at send time are still reported." });
     return;
   }
 
