@@ -97,17 +97,6 @@ async function runLoop(campaignId) {
     bodyItems = r.rows;
   }
 
-  // Optional greeting / signature pools (random pick per recipient).
-  let greetingItems = null, signatureItems = null;
-  if (c.greeting_group_id) {
-    const r = await pool.query("SELECT body, is_html FROM greeting_items WHERE group_id=$1", [c.greeting_group_id]);
-    if (r.rows.length > 0) greetingItems = r.rows;
-  }
-  if (c.signature_group_id) {
-    const r = await pool.query("SELECT body, is_html FROM signature_items WHERE group_id=$1", [c.signature_group_id]);
-    if (r.rows.length > 0) signatureItems = r.rows;
-  }
-
   const attachments = Array.isArray(c.attachments) ? c.attachments : [];
   const mailAttachments = attachments.map(a => ({ filename: a.filename, path: a.path, contentType: a.contentType }));
 
@@ -166,18 +155,8 @@ async function runLoop(campaignId) {
     if (bodyItems) { const b = pickRandom(bodyItems); emailBody = b.body; emailIsHtml = b.is_html; }
     else           { emailBody = c.body || "";        emailIsHtml = c.is_html; }
 
-    let greeting = null, signature = null;
-    if (greetingItems)    { const g = pickRandom(greetingItems);  greeting  = { text: g.body, isHtml: g.is_html }; }
-    else if (c.greeting)  { greeting  = { text: c.greeting,  isHtml: c.greeting_is_html }; }
-    if (signatureItems)   { const g = pickRandom(signatureItems); signature = { text: g.body, isHtml: g.is_html }; }
-    else if (c.signature) { signature = { text: c.signature, isHtml: c.signature_is_html }; }
-
-    // greeting → body → signature, with {{email}} / {{domain}} filled in.
-    const msg = assembleMessage([
-      greeting  && { text: renderTokens(greeting.text,  r.email), isHtml: greeting.isHtml },
-      { text: renderTokens(emailBody, r.email), isHtml: emailIsHtml },
-      signature && { text: renderTokens(signature.text, r.email), isHtml: signature.isHtml },
-    ]);
+    // Body with {{email}} / {{domain}} filled in.
+    const msg = assembleMessage([{ text: renderTokens(emailBody, r.email), isHtml: emailIsHtml }]);
 
     const fromAddr = (sender.username || "").trim();
     const fromFull = sender.from_name ? `"${sender.from_name}" <${fromAddr}>` : fromAddr;

@@ -470,8 +470,7 @@ app.post("/api/sender-groups/:id/accounts/:accountId/test", authMiddleware, asyn
 
 // ─── CAMPAIGNS: Create & start (runs in the background) ───────────────────────
 app.post("/api/campaigns", authMiddleware, upload.array("attachments", 10), async (req, res) => {
-  const { smtpHost, smtpPort, smtpUser, smtpPass, fromName, to, subject, body, isHtml, minDelay, maxDelay, senderGroupId, subjectGroupId, bodyGroupId, attachmentGroupId, name,
-          greeting, greetingIsHtml, greetingGroupId, signature, signatureIsHtml, signatureGroupId, imapHost } = req.body;
+  const { smtpHost, smtpPort, smtpUser, smtpPass, fromName, to, subject, body, isHtml, minDelay, maxDelay, senderGroupId, subjectGroupId, bodyGroupId, attachmentGroupId, name, imapHost } = req.body;
 
   if (!to) return res.json({ ok: false, message: "Recipient (To) is required." });
 
@@ -505,16 +504,6 @@ app.post("/api/campaigns", authMiddleware, upload.array("attachments", 10), asyn
     if (ag.rows.length === 0) return res.json({ ok: false, message: "Attachment group has no files. Add attachments first." });
   }
 
-  // Greeting / signature — optional; either a group or a single text.
-  if (greetingGroupId) {
-    const gi = await pool.query("SELECT 1 FROM greeting_items gi JOIN greeting_groups gg ON gg.id=gi.group_id WHERE gi.group_id=$1 AND gg.user_id=$2 LIMIT 1", [greetingGroupId, req.user.id]);
-    if (gi.rows.length === 0) return res.json({ ok: false, message: "Greeting group has no greetings. Add greetings first." });
-  }
-  if (signatureGroupId) {
-    const si = await pool.query("SELECT 1 FROM signature_items si JOIN signature_groups sg ON sg.id=si.group_id WHERE si.group_id=$1 AND sg.user_id=$2 LIMIT 1", [signatureGroupId, req.user.id]);
-    if (si.rows.length === 0) return res.json({ ok: false, message: "Signature group has no signatures. Add signatures first." });
-  }
-
   const recipients = parseRecipients(to);
   if (recipients.length === 0) return res.json({ ok: false, message: "No valid email addresses found." });
 
@@ -528,17 +517,14 @@ app.post("/api/campaigns", authMiddleware, upload.array("attachments", 10), asyn
     const ins = await pool.query(
       `INSERT INTO campaigns
          (user_id, name, status, total, subject, body, is_html, subject_group_id, body_group_id, sender_group_id,
-          smtp_host, smtp_port, smtp_user, smtp_pass, from_name, min_delay, max_delay, base_url, attachment_group_id,
-          greeting, greeting_is_html, greeting_group_id, signature, signature_is_html, signature_group_id, imap_host)
-       VALUES ($1,$2,'running',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25) RETURNING id`,
+          smtp_host, smtp_port, smtp_user, smtp_pass, from_name, min_delay, max_delay, base_url, attachment_group_id, imap_host)
+       VALUES ($1,$2,'running',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING id`,
       [req.user.id, campaignName, recipients.length,
        subjectGroupId ? null : subject, bodyGroupId ? null : body, useHtml,
        subjectGroupId || null, bodyGroupId || null, senderGroupId || null,
        senderGroupId ? null : smtpHost, senderGroupId ? null : (parseInt(smtpPort, 10) || 587),
        senderGroupId ? null : smtpUser, senderGroupId ? null : smtpPass, senderGroupId ? null : (fromName || ""),
        minS, maxS, baseUrl, attachmentGroupId || null,
-       greetingGroupId ? null : ((greeting || "").trim() || null), greetingIsHtml === "true" || greetingIsHtml === true, greetingGroupId || null,
-       signatureGroupId ? null : ((signature || "").trim() || null), signatureIsHtml === "true" || signatureIsHtml === true, signatureGroupId || null,
        senderGroupId ? null : ((imapHost || "").trim() || null)]
     );
     const campaignId = ins.rows[0].id;
@@ -1351,85 +1337,6 @@ app.post("/api/verify/batches/:id/deep-check/stop", authMiddleware, async (req, 
     res.json({ ok: false, message: err.message });
   }
 });
-
-// ─── GREETING & SIGNATURE GROUPS ──────────────────────────────────────────────
-// Same shape as Subject/Body groups: a named pool of up to MAX_GROUP_ITEMS
-// texts; one is picked at random per recipient.
-function registerTextGroups({ base, groupTable, itemTable, noun }) {
-  const cap = noun[0].toUpperCase() + noun.slice(1);
-
-  app.post(`/api/${base}`, authMiddleware, async (req, res) => {
-    const { name, description } = req.body;
-    if (!name) return res.json({ ok: false, message: "Group name is required." });
-    try {
-      const r = await pool.query(`INSERT INTO ${groupTable} (user_id, name, description) VALUES ($1,$2,$3) RETURNING *`, [req.user.id, name.trim(), description || ""]);
-      res.json({ ok: true, group: r.rows[0], message: `${cap} group created.` });
-    } catch (err) { res.json({ ok: false, message: err.message }); }
-  });
-
-  app.get(`/api/${base}`, authMiddleware, async (req, res) => {
-    try {
-      const r = await pool.query(`
-        SELECT g.*, COUNT(i.id)::int AS item_count FROM ${groupTable} g
-        LEFT JOIN ${itemTable} i ON i.group_id = g.id
-        WHERE g.user_id = $1 GROUP BY g.id ORDER BY g.created_at DESC`, [req.user.id]);
-      res.json({ ok: true, groups: r.rows });
-    } catch (err) { res.json({ ok: false, message: err.message }); }
-  });
-
-  app.get(`/api/${base}/:id`, authMiddleware, async (req, res) => {
-    try {
-      const g = await pool.query(`SELECT * FROM ${groupTable} WHERE id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
-      if (g.rows.length === 0) return res.json({ ok: false, message: `${cap} group not found.` });
-      const items = await pool.query(`SELECT * FROM ${itemTable} WHERE group_id=$1 ORDER BY sort_order ASC, created_at ASC`, [req.params.id]);
-      res.json({ ok: true, group: g.rows[0], items: items.rows });
-    } catch (err) { res.json({ ok: false, message: err.message }); }
-  });
-
-  app.delete(`/api/${base}/:id`, authMiddleware, async (req, res) => {
-    try {
-      await pool.query(`DELETE FROM ${groupTable} WHERE id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
-      res.json({ ok: true, message: `${cap} group deleted.` });
-    } catch (err) { res.json({ ok: false, message: err.message }); }
-  });
-
-  app.post(`/api/${base}/:id/items`, authMiddleware, async (req, res) => {
-    const { body, isHtml } = req.body;
-    if (!body || !body.trim()) return res.json({ ok: false, message: `${cap} text is required.` });
-    const g = await pool.query(`SELECT id FROM ${groupTable} WHERE id=$1 AND user_id=$2`, [req.params.id, req.user.id]);
-    if (g.rows.length === 0) return res.json({ ok: false, message: `${cap} group not found.` });
-    try {
-      const count = await pool.query(`SELECT COUNT(*) FROM ${itemTable} WHERE group_id=$1`, [req.params.id]);
-      const n = parseInt(count.rows[0].count);
-      if (n >= MAX_GROUP_ITEMS) return res.json({ ok: false, message: `Maximum ${MAX_GROUP_ITEMS} ${noun}s per group.` });
-      const r = await pool.query(`INSERT INTO ${itemTable} (group_id, body, is_html, sort_order) VALUES ($1,$2,$3,$4) RETURNING *`,
-        [req.params.id, body, isHtml === true || isHtml === "true", n]);
-      res.json({ ok: true, item: r.rows[0], message: `${cap} added.` });
-    } catch (err) { res.json({ ok: false, message: err.message }); }
-  });
-
-  app.put(`/api/${base}/:id/items/:itemId`, authMiddleware, async (req, res) => {
-    const { body, isHtml } = req.body;
-    if (!body || !body.trim()) return res.json({ ok: false, message: `${cap} text is required.` });
-    try {
-      await pool.query(
-        `UPDATE ${itemTable} SET body=$1, is_html=$2 WHERE id=$3 AND group_id IN (SELECT id FROM ${groupTable} WHERE id=$4 AND user_id=$5)`,
-        [body, isHtml === true || isHtml === "true", req.params.itemId, req.params.id, req.user.id]);
-      res.json({ ok: true, message: `${cap} updated.` });
-    } catch (err) { res.json({ ok: false, message: err.message }); }
-  });
-
-  app.delete(`/api/${base}/:id/items/:itemId`, authMiddleware, async (req, res) => {
-    try {
-      await pool.query(
-        `DELETE FROM ${itemTable} WHERE id=$1 AND group_id IN (SELECT id FROM ${groupTable} WHERE id=$2 AND user_id=$3)`,
-        [req.params.itemId, req.params.id, req.user.id]);
-      res.json({ ok: true, message: `${cap} deleted.` });
-    } catch (err) { res.json({ ok: false, message: err.message }); }
-  });
-}
-registerTextGroups({ base: "greeting-groups",  groupTable: "greeting_groups",  itemTable: "greeting_items",  noun: "greeting" });
-registerTextGroups({ base: "signature-groups", groupTable: "signature_groups", itemTable: "signature_items", noun: "signature" });
 
 // ─── SETTINGS: bounce rule + alert e-mail ─────────────────────────────────────
 function cleanSettings(b) {

@@ -2,10 +2,10 @@
 // Pure functions (no DB access) used by the runner, the bounce scanner and the
 // report builder, so they stay easy to test.
 
-const MAX_GROUP_ITEMS = 50; // max subjects / bodies / greetings / signatures per group
+const MAX_GROUP_ITEMS = 50; // max subjects / bodies per group
 
 // ── Personalisation tokens ────────────────────────────────────────────────────
-// {{email}} and {{domain}} are replaced in subject, greeting, body and signature.
+// {{email}} and {{domain}} are replaced in subject and body.
 function renderTokens(text, recipientEmail) {
   if (!text) return "";
   const email  = String(recipientEmail || "");
@@ -26,7 +26,7 @@ function htmlToText(html) {
     .trim();
 }
 
-// Joins greeting + body + signature into one e-mail. Each part is
+// Turns the message parts into one e-mail. Each part is
 // { text, isHtml }; empty parts are skipped. Returns { html, text }.
 function assembleMessage(parts) {
   const used = parts.filter(p => p && p.text && String(p.text).trim());

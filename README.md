@@ -200,13 +200,12 @@ domain, greylisting, or the probe couldn't get an answer).
 
 ## v5 additions
 
-### Up to 50 subjects / bodies — plus Greetings & Signatures
-Subject, Body, **Greeting** and **Signature** groups each hold up to 50 items. Every email is assembled as
-`greeting → body → signature`, each picked at random from its group (or a single fixed text). `{{email}}` and
-`{{domain}}` are replaced per recipient in subject, greeting, body and signature.
+### Up to 50 subjects / bodies
+Subject and Body groups each hold up to 50 items; one is picked at random per recipient. `{{email}}` and
+`{{domain}}` are replaced per recipient in subject and body.
 
 ### Campaign report (.xlsx)
-Open a campaign → **Download Report**. Sheets: Summary, All Recipients, Bounced & Failed, By Domain, By Sender.
+Open a campaign → **Download Report**. Sheets: **Emails by Status** (columns: Sent Successfully, Opened, Bounced + reason, Failed + reason, with the emails listed underneath), Summary, All Recipients, Bounced & Failed, By Domain, By Sender.
 
 ### What "delivered" really means
 No sender can prove a message reached the Inbox rather than Spam. The report ranks the evidence it *does* have:

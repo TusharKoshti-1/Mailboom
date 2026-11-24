@@ -195,7 +195,27 @@ async function buildReport(campaign) {
   const wsSnd = XLSX.utils.aoa_to_sheet([sumHead("Sending account"), ...groupSummary(rows, r => (r.from_addr || "(unknown)").toLowerCase()).map(sumLine)]);
   wsSnd["!cols"] = wsDom["!cols"];
 
+  // ── Emails by status: one column per outcome, emails listed underneath ──
+  // "Sent Successfully" = accepted by the recipient's server and NOT bounced
+  // (so opened emails appear there too, and again in the Opened column).
+  const sentOk = rows.filter(r => ["opened", "likely_delivered", "awaiting", "unverified"].includes(r.delivery));
+  const cols = [
+    { head: "Sent Successfully", list: sentOk.map(r => r.email) },
+    { head: "Opened",            list: rows.filter(r => r.delivery === "opened").map(r => r.email) },
+    { head: "Bounced",           list: rows.filter(r => ["bounced", "rejected"].includes(r.delivery)).map(r => r.email) },
+    { head: "Bounce Reason",     list: rows.filter(r => ["bounced", "rejected"].includes(r.delivery)).map(r => r.bounce_reason || "Unknown"), plain: true },
+    { head: "Failed", list: rows.filter(r => r.delivery === "failed").map(r => r.email) },
+    { head: "Failure Reason",    list: rows.filter(r => r.delivery === "failed").map(r => String(r.error || "Unknown error").slice(0, 120)), plain: true },
+  ];
+  if (stats.by.pending > 0) cols.push({ head: "Not Sent Yet", list: rows.filter(r => r.delivery === "pending").map(r => r.email) });
+  const tall = Math.max(0, ...cols.map(c => c.list.length));
+  const byStatusAoa = [cols.map(c => c.plain ? c.head : `${c.head} (${c.list.length})`)];
+  for (let i = 0; i < tall; i++) byStatusAoa.push(cols.map(c => c.list[i] || ""));
+  const wsBy = XLSX.utils.aoa_to_sheet(byStatusAoa);
+  wsBy["!cols"] = cols.map(c => ({ wch: c.plain ? 32 : 36 }));
+
   const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, wsBy, "Emails by Status");
   XLSX.utils.book_append_sheet(wb, wsSum, "Summary");
   XLSX.utils.book_append_sheet(wb, wsAll, "All Recipients");
   XLSX.utils.book_append_sheet(wb, wsBad, "Bounced & Failed");

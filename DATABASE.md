@@ -114,9 +114,8 @@ WHERE s.user_id = 1;
 ---
 
 ## v5 additions
-- `greeting_groups` / `greeting_items`, `signature_groups` / `signature_items` — same shape as subject/body groups (max 50 items).
 - `user_settings` — per-user bounce rule (enabled, threshold, mode) and alert email template.
 - `mailbox_scan_state` — last IMAP scan time/error/UID per sending mailbox (drives "Likely delivered" vs "unchecked").
-- `campaigns` + `greeting*`, `signature*`, `paused_by`, `pause_reason`, `bounce_reset_at`, `bounce_alert_*`, `imap_host`.
+- `campaigns` + `paused_by`, `pause_reason`, `bounce_reset_at`, `bounce_alert_*`, `imap_host`.
 - `campaign_recipients` + `tracking_id`, `message_id`, `smtp_response`, `bounce_type/source/code/reason/detail`, `bounced_at`.
 - `sender_accounts.imap_host`, `smtp_settings.imap_host`.

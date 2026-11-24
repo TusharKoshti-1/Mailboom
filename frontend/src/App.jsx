@@ -7,7 +7,7 @@ import {
   ArrowLeft, FolderOpen, UserPlus, AtSign, CheckCircle, FileText, Edit2, Type,
   Activity, BarChart3, MailOpen, Download,
   ShieldCheck, MailCheck, MailX, MailQuestion, Copy, ListChecks, ShieldQuestion,
-  Smile, PenTool, Settings, Bell, TriangleAlert, FileSpreadsheet, Inbox,
+  Settings, Bell, TriangleAlert, FileSpreadsheet, Inbox,
 } from "lucide-react";
 
 const onFocus = e => e.target.style.borderColor = "var(--accent)";
@@ -35,7 +35,7 @@ const PRESETS = {
   custom:    { label:"Custom SMTP",       host:"",                        port:"587" },
 };
 
-// Max subjects / bodies / greetings / signatures per group (keep in sync with backend MAX_GROUP_ITEMS).
+// Max subjects / bodies per group (keep in sync with backend MAX_GROUP_ITEMS).
 const MAX_ITEMS = 50;
 
 // Download a file from an auth-protected endpoint (a plain <a href> can't send the token).
@@ -136,43 +136,6 @@ function ModeToggle({ value, onChange }) {
     <div style={{ display:"flex", gap:5 }}>
       <button type="button" onClick={() => onChange(false)} style={pill(!value, false)}>Single</button>
       <button type="button" onClick={() => onChange(true)}  style={pill(value, true)}>Group</button>
-    </div>
-  );
-}
-
-// Greeting / Signature block for Compose: optional single text, or a random pick from a group.
-function PoolTextField({ label, color, noun, pageName, groups, useGroup, setUseGroup, groupId, setGroupId, text, setText, isHtml, setIsHtml, placeholder, rows }) {
-  const faint = { background:`${color}10`, border:`1px solid ${color}33`, color };
-  return (
-    <div style={{ marginBottom:16 }}>
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:6 }}>
-        <label style={{ ...S.label, marginBottom:0 }}>{label} <span style={{ textTransform:"none", letterSpacing:0, fontWeight:500 }}>(optional)</span></label>
-        <ModeToggle value={useGroup} onChange={setUseGroup}/>
-      </div>
-      {!useGroup ? (
-        <>
-          <textarea value={text} onChange={e => setText(e.target.value)} placeholder={placeholder}
-            style={{ ...S.textarea, minHeight: rows * 22 + 20 }} onFocus={onFocus} onBlur={onBlur}/>
-          <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", marginTop:8 }}>
-            <input type="checkbox" checked={isHtml} onChange={e => setIsHtml(e.target.checked)} style={{ accentColor:color }}/>
-            <span style={{ fontSize:12, color:"var(--text2)" }}>{label} is HTML</span>
-          </label>
-        </>
-      ) : groups.length === 0 ? (
-        <div style={{ padding:"14px", background:"var(--surface2)", borderRadius:"var(--radius)", fontSize:12, color:"var(--text3)", lineHeight:1.6 }}>
-          No {noun} groups yet.<br/>Go to <strong style={{ color }}>{pageName}</strong> page to create one.
-        </div>
-      ) : (
-        <>
-          <select value={groupId} onChange={e => setGroupId(e.target.value)} style={S.select} onFocus={onFocus} onBlur={onBlur}>
-            <option value="">— Select a {noun} group —</option>
-            {groups.map(g => <option key={g.id} value={g.id}>{g.name} ({g.item_count} {noun}s)</option>)}
-          </select>
-          {groupId && <div style={{ marginTop:8, padding:"8px 12px", borderRadius:"var(--radius)", fontSize:12, lineHeight:1.6, ...faint }}>
-            ✓ Each recipient gets a randomly picked {noun} from this group
-          </div>}
-        </>
-      )}
     </div>
   );
 }
@@ -834,17 +797,6 @@ function ComposePage({ authHeader }) {
   const [attachmentGroupId,  setAttachmentGroupId]  = useState("");
   const [useAttachmentGroup, setUseAttachmentGroup] = useState(false);
 
-  // Greeting / signature (optional): single text or random from a group
-  const [greetingGroups,   setGreetingGroups]   = useState([]);
-  const [greetingGroupId,  setGreetingGroupId]  = useState("");
-  const [useGreetingGroup, setUseGreetingGroup] = useState(false);
-  const [greeting,         setGreeting]         = useState("");
-  const [greetingIsHtml,   setGreetingIsHtml]   = useState(false);
-  const [signatureGroups,   setSignatureGroups]   = useState([]);
-  const [signatureGroupId,  setSignatureGroupId]  = useState("");
-  const [useSignatureGroup, setUseSignatureGroup] = useState(false);
-  const [signature,         setSignature]         = useState("");
-  const [signatureIsHtml,   setSignatureIsHtml]   = useState(false);
   const [imapHost, setImapHost] = useState(""); // optional — where bounce notices are read from
 
   const [to,       setTo]       = useState("");
@@ -901,16 +853,6 @@ function ComposePage({ authHeader }) {
       .then(data => { if (data.ok) setBodyGroups(data.groups); })
       .catch(() => {});
 
-    // Load greeting / signature groups
-    fetch("/api/greeting-groups", { headers: authHeader })
-      .then(r => r.json())
-      .then(data => { if (data.ok) setGreetingGroups(data.groups); })
-      .catch(() => {});
-    fetch("/api/signature-groups", { headers: authHeader })
-      .then(r => r.json())
-      .then(data => { if (data.ok) setSignatureGroups(data.groups); })
-      .catch(() => {});
-
     // Load attachment groups
     fetch("/api/attachment-groups", { headers: authHeader })
       .then(r => r.json())
@@ -962,8 +904,6 @@ function ComposePage({ authHeader }) {
     if (useBodyGroup && !bodyGroupId)       return addLog("error", "❌ Select a Body Group.");
     if (!useBodyGroup && !body)             return addLog("error", "❌ Write a message body or select a Body Group.");
     if (useAttachmentGroup && !attachmentGroupId) return addLog("error", "❌ Select an Attachment Group.");
-    if (useGreetingGroup && !greetingGroupId)     return addLog("error", "❌ Select a Greeting Group (or switch Greeting to Single).");
-    if (useSignatureGroup && !signatureGroupId)   return addLog("error", "❌ Select a Signature Group (or switch Signature to Single).");
     if (recipientList.length === 0) return addLog("error", "❌ No valid emails found.");
 
     const min = parseFloat(minDelay)||30;
@@ -995,10 +935,6 @@ function ComposePage({ authHeader }) {
       fd.append("body",   body);
       fd.append("isHtml", isHtml ? "true" : "false");
     }
-    if (useGreetingGroup && greetingGroupId) fd.append("greetingGroupId", greetingGroupId);
-    else if (greeting.trim()) { fd.append("greeting", greeting); fd.append("greetingIsHtml", greetingIsHtml ? "true" : "false"); }
-    if (useSignatureGroup && signatureGroupId) fd.append("signatureGroupId", signatureGroupId);
-    else if (signature.trim()) { fd.append("signature", signature); fd.append("signatureIsHtml", signatureIsHtml ? "true" : "false"); }
     if (!useSenderGroup && imapHost.trim()) fd.append("imapHost", imapHost.trim());
     fd.append("name", subject || "Campaign");
     fd.append("minDelay", min);    fd.append("maxDelay", max);
@@ -1236,13 +1172,6 @@ function ComposePage({ authHeader }) {
             )}
           </div>
 
-          {/* ── Greeting ── */}
-          <PoolTextField label="Greeting" color="#10b981" noun="greeting" pageName="Greetings"
-            groups={greetingGroups} useGroup={useGreetingGroup} setUseGroup={setUseGreetingGroup}
-            groupId={greetingGroupId} setGroupId={setGreetingGroupId}
-            text={greeting} setText={setGreeting} isHtml={greetingIsHtml} setIsHtml={setGreetingIsHtml}
-            placeholder={"Hello,   (use {{email}} or {{domain}} to personalise)"} rows={2}/>
-
           {/* ── Message Body ── */}
           <div style={{ marginBottom:16 }}>
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:6 }}>
@@ -1279,12 +1208,6 @@ function ComposePage({ authHeader }) {
             )}
           </div>
 
-          {/* ── Signature ── */}
-          <PoolTextField label="Signature" color="#ec4899" noun="signature" pageName="Signatures"
-            groups={signatureGroups} useGroup={useSignatureGroup} setUseGroup={setUseSignatureGroup}
-            groupId={signatureGroupId} setGroupId={setSignatureGroupId}
-            text={signature} setText={setSignature} isHtml={signatureIsHtml} setIsHtml={setSignatureIsHtml}
-            placeholder={"Best regards,\nYour Name\nCompany"} rows={4}/>
         </div>
 
         {sending && progress && progress.total > 1 && (
@@ -1650,29 +1573,6 @@ const BODY_CFG = {
   subtitle:`Add up to ${MAX_ITEMS} message bodies per group. Each recipient gets a randomly picked body. Use {{email}} / {{domain}} to personalise.`,
   icon:(size, opacity) => <FileText size={size} color="#0ea5e9" style={opacity ? { opacity, display:"block", margin:"0 auto" } : undefined}/>,
 };
-
-const GREETING_CFG = {
-  apiBase:"/api/greeting-groups", title:"Greeting Groups", noun:"greeting", nounPlural:"greetings",
-  field:"body", multiline:true, hasHtml:true, fieldLabel:"Greeting Text", minHeight:90,
-  placeholderText:"Hello,", placeholderHtml:"<p>Hello,</p>", max:MAX_ITEMS,
-  color:"#10b981", colorDim:"rgba(16,185,129,0.15)", colorFaint:"rgba(16,185,129,0.06)",
-  namePlaceholder:"e.g. Friendly Openers",
-  subtitle:`Add up to ${MAX_ITEMS} greetings per group (Hello, Hi there, Dear Sir/Madam...). One is placed above the body for each recipient. Use {{email}} / {{domain}} to personalise.`,
-  icon:(size, opacity) => <Smile size={size} color="#10b981" style={opacity ? { opacity, display:"block", margin:"0 auto" } : undefined}/>,
-};
-
-const SIGNATURE_CFG = {
-  apiBase:"/api/signature-groups", title:"Signature Groups", noun:"signature", nounPlural:"signatures",
-  field:"body", multiline:true, hasHtml:true, fieldLabel:"Signature Text", minHeight:130,
-  placeholderText:"Best regards,\nJohn Smith\nSales Manager | Acme Inc.\n+1 555 0100", placeholderHtml:"<p>Best regards,<br><b>John Smith</b><br>Acme Inc.</p>", max:MAX_ITEMS,
-  color:"#ec4899", colorDim:"rgba(236,72,153,0.15)", colorFaint:"rgba(236,72,153,0.06)",
-  namePlaceholder:"e.g. Sales Team Signatures",
-  subtitle:`Add up to ${MAX_ITEMS} signatures per group. One is placed below the body for each recipient. Use {{email}} / {{domain}} to personalise.`,
-  icon:(size, opacity) => <PenTool size={size} color="#ec4899" style={opacity ? { opacity, display:"block", margin:"0 auto" } : undefined}/>,
-};
-
-function GreetingGroupsPage({ authHeader })  { return <ItemGroupsPage authHeader={authHeader} cfg={GREETING_CFG}/>; }
-function SignatureGroupsPage({ authHeader }) { return <ItemGroupsPage authHeader={authHeader} cfg={SIGNATURE_CFG}/>; }
 
 function SubjectGroupsPage({ authHeader }) { return <ItemGroupsPage authHeader={authHeader} cfg={SUBJECT_CFG}/>; }
 function BodyGroupsPage({ authHeader })    { return <ItemGroupsPage authHeader={authHeader} cfg={BODY_CFG}/>; }
@@ -3037,9 +2937,7 @@ function MainApp({ user, token, onLogout }) {
     { to:"/compose",          label:"Compose",           icon:<Mail size={13}/> },
     { to:"/campaigns",        label:"Campaigns",         icon:<Send size={13}/> },
     { to:"/subject-groups",   label:"Subject Groups",    icon:<Type size={13}/> },
-    { to:"/greeting-groups",  label:"Greetings",         icon:<Smile size={13}/> },
     { to:"/body-groups",      label:"Body Groups",       icon:<FileText size={13}/> },
-    { to:"/signature-groups", label:"Signatures",        icon:<PenTool size={13}/> },
     { to:"/attachment-groups",label:"Attachment Groups", icon:<Paperclip size={13}/> },
     { to:"/sender-groups",    label:"Sender Groups",     icon:<AtSign size={13}/> },
     { to:"/recipient-groups", label:"Recipient Groups",  icon:<Users size={13}/> },
@@ -3087,9 +2985,7 @@ function MainApp({ user, token, onLogout }) {
         <Route path="/campaigns"        element={<CampaignsPage authHeader={authHeader}/>}/>
         <Route path="/campaigns/:id"    element={<CampaignDetailPage authHeader={authHeader}/>}/>
         <Route path="/subject-groups"   element={<SubjectGroupsPage authHeader={authHeader}/>}/>
-        <Route path="/greeting-groups"  element={<GreetingGroupsPage authHeader={authHeader}/>}/>
         <Route path="/body-groups"      element={<BodyGroupsPage authHeader={authHeader}/>}/>
-        <Route path="/signature-groups" element={<SignatureGroupsPage authHeader={authHeader}/>}/>
         <Route path="/settings"         element={<SettingsPage authHeader={authHeader}/>}/>
         <Route path="/attachment-groups" element={<AttachmentGroupsPage authHeader={authHeader}/>}/>
         <Route path="/sender-groups"    element={<SenderGroupsPage authHeader={authHeader}/>}/>
