@@ -50,14 +50,31 @@ function extractEnhancedCode(text) {
 
 const BLOCK_RE = /spam|blocked|blacklist|block list|blocklist|reputation|policy|denied|rbl|spamhaus|dnsbl|not authori[sz]ed|relay|rejected due to|sender.*(refused|rejected)|5\.7\./i;
 
+// Reason text used for "the account exists but is switched off / abandoned".
+const DISABLED_REASON = "Mailbox disabled or discontinued";
+const DISABLED_RE = /disabled|deactivated|suspended|inactive|discontinued|no longer (active|available|in use|valid|accepting)|account.*(closed|expired|terminated|blocked)|has been (disabled|deleted|removed|closed)|not (currently )?(active|enabled)/i;
+
+// True when a bounce means the mailbox is disabled/discontinued. Works on fresh
+// classifications AND on old rows (re-reads the server's own wording).
+function isMailboxDisabled({ reason, code, detail } = {}) {
+  if (reason === DISABLED_REASON) return true;
+  if (/^5\.2\.1$/.test(String(code || "").trim())) return true;
+  return DISABLED_RE.test(String(detail || ""));
+}
+
 // Turns an enhanced status code + free text into { type, reason }.
 function classifyBounce({ code, text, permanent = true }) {
   const t = String(text || "");
-  const c = code || extractEnhancedCode(t) || "";
+  // Servers often send "5.1.1 (bad destination mailbox address)" — keep only the bare code (it is stored in a short column).
+  const c = extractEnhancedCode(code) || extractEnhancedCode(t) || "";
   let type = permanent ? "hard" : "soft";
   let reason;
 
-  if (/^5\.1\.(1|0|10)$/.test(c) || /user unknown|no such user|does not exist|unknown user|mailbox not found|invalid (recipient|mailbox)|recipient (address )?rejected|address rejected|no mailbox/i.test(t)) {
+  if (/^5\.2\.1$/.test(c) || DISABLED_RE.test(t)) {
+    type = "hard"; reason = DISABLED_REASON;
+  } else if (/suppress/i.test(t)) {
+    type = "hard"; reason = "On Amazon SES suppression list (bounced before)";
+  } else if (/^5\.1\.(1|0|10)$/.test(c) || /user unknown|no such user|does not exist|unknown user|mailbox not found|invalid (recipient|mailbox)|recipient (address )?rejected|address rejected|no mailbox|couldn't be found|address not found/i.test(t)) {
     type = "hard"; reason = "Mailbox does not exist";
   } else if (/^5\.1\.2$/.test(c) || /domain (not found|does not exist)|host or domain name not found|no such domain|unrouteable|NXDOMAIN/i.test(t)) {
     type = "hard"; reason = "Domain does not exist";
@@ -65,8 +82,6 @@ function classifyBounce({ code, text, permanent = true }) {
     type = "hard"; reason = "Recipient domain cannot be reached";
   } else if (/^5\.2\.2$/.test(c) || /mailbox (is )?full|over quota|quota exceeded|insufficient storage/i.test(t)) {
     type = "soft"; reason = "Mailbox full";
-  } else if (/^5\.2\.1$/.test(c) || /disabled|deactivated|suspended|account.*(inactive|closed)/i.test(t)) {
-    type = "hard"; reason = "Mailbox disabled or discontinued";
   } else if (/^5\.7\./.test(c) || BLOCK_RE.test(t)) {
     type = "blocked"; reason = "Rejected as spam / blocked by recipient server";
   } else if (!permanent) {
@@ -145,6 +160,6 @@ function applyTemplate(tpl, vars) {
 
 module.exports = {
   MAX_GROUP_ITEMS, renderTokens, htmlToText, assembleMessage,
-  extractEnhancedCode, classifyBounce, classifySendError, deriveImapHost,
+  extractEnhancedCode, classifyBounce, classifySendError, deriveImapHost, isMailboxDisabled, DISABLED_REASON,
   DEFAULT_SETTINGS, DEFAULT_ALERT_SUBJECT, DEFAULT_ALERT_BODY, applyTemplate,
 };

@@ -121,3 +121,8 @@ WHERE s.user_id = 1;
 - `sender_accounts.imap_host`, `smtp_settings.imap_host`.
 
 - `smtp_settings.from_email`, `sender_accounts.from_email`, `campaigns.from_email` — visible From address when it differs from the SMTP login (Amazon SES).
+
+## v6 additions
+- `unsubscribes` (user_id, email, source link|one-click|manual|complaint, campaign_id, note) — unique per user + email.
+- `campaigns.unsubscribe_enabled`; `campaign_recipients.status` may now be `skipped` (unsubscribed).
+- `campaign_recipients.delivered_at`, `complained_at` — set by Amazon SES events.

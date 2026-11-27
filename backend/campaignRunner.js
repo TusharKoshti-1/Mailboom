@@ -8,6 +8,7 @@ const crypto     = require("crypto");
 const { pool }   = require("./db");
 const { assembleMessage, renderTokens, classifySendError } = require("./mailUtils");
 const bounceGuard = require("./bounceGuard");
+const unsub = require("./unsubscribe");
 
 // campaignId -> { stop: bool, pause: bool } — control flags for the active loop.
 const controls = new Map();
@@ -69,6 +70,18 @@ function signalPause(campaignId) {
 function signalStop(campaignId) {
   const ctrl = controls.get(Number(campaignId));
   if (ctrl) ctrl.stop = true;
+}
+
+// Marks the recipient as skipped when their address is on the unsubscribe list.
+// total shrinks by one so progress still reaches 100%.
+async function skipIfUnsubscribed(c, r) {
+  let gone = false;
+  try { gone = await unsub.isUnsubscribed(c.user_id, r.email); } catch { return false; }
+  if (!gone) return false;
+  const u = await pool.query("UPDATE campaign_recipients SET status='skipped', error='Unsubscribed' WHERE id=$1 AND status='pending'", [r.id]);
+  if (u.rowCount > 0) await pool.query("UPDATE campaigns SET total = GREATEST(total - 1, 0) WHERE id=$1", [c.id]);
+  console.log(`⏭ [campaign:${c.id}] skipped ${r.email} (unsubscribed)`);
+  return true;
 }
 
 async function runLoop(campaignId) {
@@ -135,11 +148,15 @@ async function runLoop(campaignId) {
     }
     const r = next.rows[0];
 
+    // Never email someone who has unsubscribed (even if they did so mid-campaign).
+    if (await skipIfUnsubscribed(c, r)) continue;
+
     // Rate-limit: wait between sends (not before the very first send).
     if (processed > 0) {
       await interruptibleDelay(randBetween(c.min_delay, c.max_delay), campaignId);
       const c2 = controls.get(campaignId);
       if (!c2 || c2.stop || c2.pause) break;
+      if (await skipIfUnsubscribed(c, r)) continue; // unsubscribed while we were waiting
     }
 
     // Resolve sender, subject, body for this recipient.
@@ -169,11 +186,25 @@ async function runLoop(campaignId) {
     const messageId = `<${trackingId}@${senderDomain}>`;
     const pixel = `<img src="${c.base_url}/api/track/open/${trackingId}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden" />`;
 
+    // Unsubscribe link + RFC 8058 one-click headers (Gmail/Yahoo expect these for bulk mail).
+    const wantUnsub = c.unsubscribe_enabled !== false;
+    const unsubLink = wantUnsub ? unsub.unsubscribeUrl(c.base_url, c.user_id, campaignId, r.email) : null;
+    const foot = unsubLink ? unsub.footer(unsubLink) : { html: "", text: "" };
+
     const mailOptions = {
       from: fromFull, to: r.email, subject: emailSubject, messageId,
-      text: msg.text,
-      html: msg.html + pixel,
+      text: msg.text + foot.text,
+      html: msg.html + foot.html + pixel,
     };
+    mailOptions.headers = {};
+    if (unsubLink) {
+      mailOptions.headers["List-Unsubscribe"] = `<${unsubLink}>`;
+      mailOptions.headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click";
+    }
+    // Amazon SES: tag the message so delivery/bounce events can be matched back to this recipient.
+    if (/amazonaws\.com$/i.test(String(sender.host || "").trim())) {
+      mailOptions.headers["X-SES-MESSAGE-TAGS"] = `mb_tid=${trackingId}`;
+    }
     // A random-attachment group (if set) overrides the fixed attachments — one
     // random file per recipient, mirroring random subject/body.
     if (attachmentItems) {

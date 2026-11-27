@@ -16,6 +16,8 @@ const deepVerifier     = require("./deepVerifier");
 const bounceScanner    = require("./bounceScanner");
 const bounceGuard      = require("./bounceGuard");
 const campaignReport   = require("./campaignReport");
+const sesEvents        = require("./sesEvents");
+const unsub            = require("./unsubscribe");
 const { MAX_GROUP_ITEMS, DEFAULT_SETTINGS, deriveImapHost } = require("./mailUtils");
 
 // Where campaign attachments are persisted so the background worker can read
@@ -92,7 +94,7 @@ function pickRandom(arr) {
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", version: "5.0.0", timestamp: new Date().toISOString() });
+  res.json({ status: "ok", version: "6.0.0", timestamp: new Date().toISOString() });
 });
 
 // ─── TRACKING PIXEL (public, no auth) ─────────────────────────────────────────
@@ -483,7 +485,7 @@ app.post("/api/sender-groups/:id/accounts/:accountId/test", authMiddleware, asyn
 
 // ─── CAMPAIGNS: Create & start (runs in the background) ───────────────────────
 app.post("/api/campaigns", authMiddleware, upload.array("attachments", 10), async (req, res) => {
-  const { smtpHost, smtpPort, smtpUser, smtpPass, fromName, to, subject, body, isHtml, minDelay, maxDelay, senderGroupId, subjectGroupId, bodyGroupId, attachmentGroupId, name, imapHost, fromEmail } = req.body;
+  const { smtpHost, smtpPort, smtpUser, smtpPass, fromName, to, subject, body, isHtml, minDelay, maxDelay, senderGroupId, subjectGroupId, bodyGroupId, attachmentGroupId, name, imapHost, fromEmail, unsubscribe } = req.body;
 
   if (!to) return res.json({ ok: false, message: "Recipient (To) is required." });
 
@@ -520,8 +522,22 @@ app.post("/api/campaigns", authMiddleware, upload.array("attachments", 10), asyn
   const campaignFrom = cleanFromEmail(fromEmail);
   if (campaignFrom.error) return res.json({ ok: false, message: campaignFrom.error });
 
-  const recipients = parseRecipients(to);
-  if (recipients.length === 0) return res.json({ ok: false, message: "No valid email addresses found." });
+  const allRecipients = parseRecipients(to);
+  if (allRecipients.length === 0) return res.json({ ok: false, message: "No valid email addresses found." });
+
+  // Anyone on the unsubscribe list is never mailed again — they are kept in the
+  // campaign as "skipped" (so the report shows them) but not counted as part of the send.
+  const gone = new Set();
+  for (let i = 0; i < allRecipients.length; i += 5000) {
+    const u = await pool.query("SELECT email FROM unsubscribes WHERE user_id=$1 AND email = ANY($2)",
+      [req.user.id, allRecipients.slice(i, i + 5000).map(e => e.toLowerCase())]);
+    u.rows.forEach(r => gone.add(r.email));
+  }
+  const recipients = allRecipients.filter(e => !gone.has(e.toLowerCase()));
+  const skippedRecipients = allRecipients.filter(e => gone.has(e.toLowerCase()));
+  if (recipients.length === 0)
+    return res.json({ ok: false, message: `All ${allRecipients.length} address(es) are on your unsubscribe list — nothing to send.` });
+  const unsubOn = !(unsubscribe === false || unsubscribe === "false");
 
   const useHtml      = isHtml === "true" || isHtml === true;
   const minS         = parseFloat(minDelay) || 10;
@@ -533,8 +549,8 @@ app.post("/api/campaigns", authMiddleware, upload.array("attachments", 10), asyn
     const ins = await pool.query(
       `INSERT INTO campaigns
          (user_id, name, status, total, subject, body, is_html, subject_group_id, body_group_id, sender_group_id,
-          smtp_host, smtp_port, smtp_user, smtp_pass, from_name, min_delay, max_delay, base_url, attachment_group_id, imap_host, from_email)
-       VALUES ($1,$2,'running',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING id`,
+          smtp_host, smtp_port, smtp_user, smtp_pass, from_name, min_delay, max_delay, base_url, attachment_group_id, imap_host, from_email, unsubscribe_enabled)
+       VALUES ($1,$2,'running',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING id`,
       [req.user.id, campaignName, recipients.length,
        subjectGroupId ? null : subject, bodyGroupId ? null : body, useHtml,
        subjectGroupId || null, bodyGroupId || null, senderGroupId || null,
@@ -542,7 +558,7 @@ app.post("/api/campaigns", authMiddleware, upload.array("attachments", 10), asyn
        senderGroupId ? null : smtpUser, senderGroupId ? null : smtpPass, senderGroupId ? null : (fromName || ""),
        minS, maxS, baseUrl, attachmentGroupId || null,
        senderGroupId ? null : ((imapHost || "").trim() || null),
-       senderGroupId ? null : campaignFrom.value]
+       senderGroupId ? null : campaignFrom.value, unsubOn]
     );
     const campaignId = ins.rows[0].id;
 
@@ -572,8 +588,21 @@ app.post("/api/campaigns", authMiddleware, upload.array("attachments", 10), asyn
       await pool.query(`INSERT INTO campaign_recipients (campaign_id, email, idx) VALUES ${values.join(",")}`, params);
     }
 
+    // Unsubscribed addresses: recorded as 'skipped', never sent.
+    for (let i = 0; i < skippedRecipients.length; i += chunk) {
+      const slice = skippedRecipients.slice(i, i + chunk);
+      const values = [], params = [];
+      slice.forEach((email, j) => {
+        const b = j * 3;
+        params.push(campaignId, email, recipients.length + i + j);
+        values.push(`($${b + 1},$${b + 2},$${b + 3},'skipped','Unsubscribed')`);
+      });
+      await pool.query(`INSERT INTO campaign_recipients (campaign_id, email, idx, status, error) VALUES ${values.join(",")}`, params);
+    }
+
     campaignRunner.startCampaign(campaignId);
-    res.json({ ok: true, campaignId, total: recipients.length, message: `Campaign started — sending ${recipients.length} email(s) in the background.` });
+    const skipNote = skippedRecipients.length ? ` ${skippedRecipients.length} unsubscribed address(es) skipped.` : "";
+    res.json({ ok: true, campaignId, total: recipients.length, skipped: skippedRecipients.length, message: `Campaign started — sending ${recipients.length} email(s) in the background.${skipNote}` });
   } catch (err) {
     res.json({ ok: false, message: err.message });
   }
@@ -600,7 +629,7 @@ app.get("/api/campaigns/:id", authMiddleware, async (req, res) => {
   try {
     const c = await pool.query(
       `SELECT id, name, status, total, sent_count, failed_count, is_html, min_delay, max_delay, created_at, finished_at,
-              paused_by, pause_reason, bounce_alert_sent_at, bounce_alert_error
+              paused_by, pause_reason, bounce_alert_sent_at, bounce_alert_error, unsubscribe_enabled
        FROM campaigns WHERE id=$1 AND user_id=$2`,
       [req.params.id, req.user.id]
     );
@@ -1398,6 +1427,157 @@ app.post("/api/settings/test-alert", authMiddleware, async (req, res) => {
     const to = await bounceGuard.sendTestAlert(req.user.id, publicBaseUrl(req), cleanSettings(req.body || {}));
     res.json({ ok: true, message: `Test alert sent to ${to}.` });
   } catch (err) { res.json({ ok: false, message: `Could not send test alert: ${err.message}` }); }
+});
+
+// ─── RENAME GROUPS (name + description) ───────────────────────────────────────
+function registerRename(base, table) {
+  app.put(`/api/${base}/:id`, authMiddleware, async (req, res) => {
+    const name = String((req.body || {}).name || "").trim();
+    if (!name) return res.json({ ok: false, message: "Group name is required." });
+    try {
+      const r = await pool.query(
+        `UPDATE ${table} SET name=$1, description=$2 WHERE id=$3 AND user_id=$4 RETURNING id, name, description`,
+        [name.slice(0, 100), String((req.body || {}).description || "").slice(0, 255), req.params.id, req.user.id]);
+      if (r.rows.length === 0) return res.json({ ok: false, message: "Group not found." });
+      res.json({ ok: true, group: r.rows[0], message: "Group renamed." });
+    } catch (err) { res.json({ ok: false, message: err.message }); }
+  });
+}
+registerRename("sender-groups",     "sender_groups");
+registerRename("subject-groups",    "subject_groups");
+registerRename("body-groups",       "body_groups");
+registerRename("attachment-groups", "attachment_groups");
+registerRename("groups",            "email_groups"); // recipient groups
+
+// ─── UNSUBSCRIBE: public pages (no login) ─────────────────────────────────────
+const escHtml = (t) => String(t).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+function unsubPage(title, inner) {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
+<title>${escHtml(title)}</title><style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#f4f5f7;font-family:Arial,Helvetica,sans-serif;color:#222}
+.card{background:#fff;max-width:440px;width:90%;padding:36px 32px;border-radius:12px;box-shadow:0 4px 24px rgba(0,0,0,.08);text-align:center}
+h1{font-size:21px;margin:0 0 12px}p{font-size:14px;line-height:1.6;color:#555;margin:0 0 20px}b{color:#222}
+button{background:#d93025;color:#fff;border:0;border-radius:8px;padding:12px 28px;font-size:15px;font-weight:700;cursor:pointer}button:hover{background:#b3261e}</style></head>
+<body><div class="card">${inner}</div></body></html>`;
+}
+
+// Opening the link only SHOWS a confirm button. (Mail security scanners pre-open
+// links; unsubscribing on a plain GET would remove people who never clicked.)
+app.get("/unsubscribe/:token", (req, res) => {
+  const t = unsub.readToken(req.params.token);
+  if (!t) return res.status(400).send(unsubPage("Invalid link", "<h1>Invalid link</h1><p>This unsubscribe link is not valid or has been damaged.</p>"));
+  res.send(unsubPage("Unsubscribe", `<h1>Unsubscribe</h1><p>Stop all emails to <b>${escHtml(t.email)}</b>?</p>
+<form method="POST"><input type="hidden" name="confirm" value="1"><button type="submit">Yes, unsubscribe me</button></form>`));
+});
+
+// POST = the confirm button, or a mail app's one-click unsubscribe (RFC 8058).
+app.post("/unsubscribe/:token", async (req, res) => {
+  const t = unsub.readToken(req.params.token);
+  if (!t) return res.status(400).send(unsubPage("Invalid link", "<h1>Invalid link</h1><p>This unsubscribe link is not valid or has been damaged.</p>"));
+  try {
+    const oneClick = String((req.body || {})["List-Unsubscribe"] || "").toLowerCase() === "one-click";
+    const added = await unsub.addUnsubscribe(t.userId, t.email, { source: oneClick ? "one-click" : "link", campaignId: t.campaignId });
+    if (added) console.log(`🚫 unsubscribed: ${t.email} (user ${t.userId}, campaign ${t.campaignId || "-"})`);
+    res.send(unsubPage("Unsubscribed", `<h1>You have been unsubscribed</h1><p><b>${escHtml(t.email)}</b> will not receive any more emails from this sender.</p>`));
+  } catch (err) {
+    res.status(500).send(unsubPage("Error", "<h1>Something went wrong</h1><p>Please try again in a moment.</p>"));
+  }
+});
+
+// ─── UNSUBSCRIBE: manage the list (login required) ────────────────────────────
+function parseEmailList(raw) {
+  const seen = new Set(), out = [], invalid = [];
+  for (const part of String(raw || "").split(/[\s,;]+/)) {
+    const e = part.trim().toLowerCase();
+    if (!e) continue;
+    if (!EMAIL_RE.test(e)) { invalid.push(part); continue; }
+    if (!seen.has(e)) { seen.add(e); out.push(e); }
+  }
+  return { emails: out, invalid };
+}
+function unsubWhere(userId, search) {
+  const params = [userId]; let where = "u.user_id = $1";
+  if (search && String(search).trim()) { params.push(`%${String(search).trim().toLowerCase()}%`); where += ` AND (u.email LIKE $2 OR lower(COALESCE(u.note,'')) LIKE $2)`; }
+  return { where, params };
+}
+
+app.get("/api/unsubscribes", authMiddleware, async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+    const page  = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const { where, params } = unsubWhere(req.user.id, req.query.search);
+    const total = await pool.query(`SELECT COUNT(*)::int AS n FROM unsubscribes u WHERE ${where}`, params);
+    const rows = await pool.query(
+      `SELECT u.id, u.email, u.source, u.note, u.campaign_id, u.created_at, c.name AS campaign_name
+         FROM unsubscribes u LEFT JOIN campaigns c ON c.id = u.campaign_id
+        WHERE ${where} ORDER BY u.created_at DESC, u.id DESC LIMIT ${limit} OFFSET ${(page - 1) * limit}`, params);
+    const all = await pool.query("SELECT COUNT(*)::int AS n FROM unsubscribes WHERE user_id=$1", [req.user.id]);
+    res.json({ ok: true, rows: rows.rows, total: total.rows[0].n, overall: all.rows[0].n, page, limit });
+  } catch (err) { res.json({ ok: false, message: err.message }); }
+});
+
+app.get("/api/unsubscribes/export", authMiddleware, async (req, res) => {
+  try {
+    const { where, params } = unsubWhere(req.user.id, req.query.search);
+    const r = await pool.query(
+      `SELECT u.email, u.source, u.note, u.created_at, c.name AS campaign_name
+         FROM unsubscribes u LEFT JOIN campaigns c ON c.id = u.campaign_id WHERE ${where} ORDER BY u.created_at DESC`, params);
+    const fmt = (d) => d ? new Date(d).toISOString().replace("T", " ").slice(0, 19) : "";
+    const label = { link: "Clicked unsubscribe link", "one-click": "One-click (mail app)", manual: "Added manually", complaint: "Spam complaint" };
+    const ws = XLSX.utils.aoa_to_sheet([["Email", "How", "Campaign", "Unsubscribed at", "Note"],
+      ...r.rows.map(x => [x.email, label[x.source] || x.source, x.campaign_name || "", fmt(x.created_at), x.note || ""])]);
+    ws["!cols"] = [{ wch: 36 }, { wch: 26 }, { wch: 30 }, { wch: 20 }, { wch: 40 }];
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Unsubscribed");
+    res.set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.set("Content-Disposition", `attachment; filename="unsubscribed-${new Date().toISOString().slice(0, 10)}.xlsx"`);
+    res.send(XLSX.write(wb, { type: "buffer", bookType: "xlsx" }));
+  } catch (err) { res.status(500).json({ ok: false, message: err.message }); }
+});
+
+app.post("/api/unsubscribes", authMiddleware, async (req, res) => {
+  try {
+    const { emails, invalid } = parseEmailList((req.body || {}).emails);
+    if (emails.length === 0) return res.json({ ok: false, message: invalid.length ? "No valid email addresses found." : "Enter at least one email address." });
+    let added = 0;
+    for (const e of emails) if (await unsub.addUnsubscribe(req.user.id, e, { source: "manual", note: String((req.body || {}).note || "").trim() || null })) added++;
+    const parts = [`${added} added`]; if (emails.length - added) parts.push(`${emails.length - added} already on the list`); if (invalid.length) parts.push(`${invalid.length} invalid ignored`);
+    res.json({ ok: true, added, message: parts.join(", ") + "." });
+  } catch (err) { res.json({ ok: false, message: err.message }); }
+});
+
+app.put("/api/unsubscribes/:id", authMiddleware, async (req, res) => {
+  const email = String((req.body || {}).email || "").trim().toLowerCase();
+  if (!EMAIL_RE.test(email)) return res.json({ ok: false, message: "Enter a valid email address." });
+  try {
+    const r = await pool.query("UPDATE unsubscribes SET email=$1, note=$2 WHERE id=$3 AND user_id=$4 RETURNING id",
+      [email, String((req.body || {}).note || "").trim() || null, req.params.id, req.user.id]);
+    if (r.rows.length === 0) return res.json({ ok: false, message: "Entry not found." });
+    res.json({ ok: true, message: "Saved." });
+  } catch (err) {
+    res.json({ ok: false, message: err.code === "23505" ? "That email is already on the list." : err.message });
+  }
+});
+
+app.delete("/api/unsubscribes/:id", authMiddleware, async (req, res) => {
+  try {
+    await pool.query("DELETE FROM unsubscribes WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]);
+    res.json({ ok: true, message: "Removed — this address can be emailed again." });
+  } catch (err) { res.json({ ok: false, message: err.message }); }
+});
+
+app.post("/api/unsubscribes/bulk-delete", authMiddleware, async (req, res) => {
+  try {
+    const ids = ((req.body || {}).ids || []).map(Number).filter(Boolean);
+    if (ids.length === 0) return res.json({ ok: false, message: "Nothing selected." });
+    const r = await pool.query("DELETE FROM unsubscribes WHERE user_id=$1 AND id = ANY($2)", [req.user.id, ids]);
+    res.json({ ok: true, message: `${r.rowCount} removed — they can be emailed again.` });
+  } catch (err) { res.json({ ok: false, message: err.message }); }
+});
+
+// ─── AMAZON SES EVENTS (delivery / bounce / complaint) ────────────────────────
+app.post("/api/ses/events/:secret", express.json({ type: () => true, limit: "1mb" }), sesEvents.handleHttp);
+
+app.get("/api/settings/ses-webhook", authMiddleware, (req, res) => {
+  res.json({ ok: true, url: `${publicBaseUrl(req)}/api/ses/events/${sesEvents.webhookSecret()}` });
 });
 
 // ─── SPA Fallback — MUST BE LAST ─────────────────────────────────────────────

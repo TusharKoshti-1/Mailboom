@@ -7,7 +7,7 @@ import {
   ArrowLeft, FolderOpen, UserPlus, AtSign, CheckCircle, FileText, Edit2, Type,
   Activity, BarChart3, MailOpen, Download,
   ShieldCheck, MailCheck, MailX, MailQuestion, Copy, ListChecks, ShieldQuestion,
-  Settings, Bell, TriangleAlert, FileSpreadsheet, Inbox,
+  Settings, Bell, TriangleAlert, FileSpreadsheet, Inbox, UserX, Search,
 } from "lucide-react";
 
 const onFocus = e => e.target.style.borderColor = "var(--accent)";
@@ -203,6 +203,51 @@ function AuthPage({ onLogin }) {
 }
 
 // ─── SENDER GROUPS PAGE ───────────────────────────────────────────────────────
+// Group name + description with a pencil to rename in place (used by every group list).
+function GroupTitle({ g, apiBase, authHeader, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(g.name);
+  const [desc, setDesc] = useState(g.description || "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr]   = useState("");
+
+  const start = () => { setName(g.name); setDesc(g.description || ""); setErr(""); setEditing(true); };
+  const save = async () => {
+    if (!name.trim()) return setErr("Name is required.");
+    setBusy(true); setErr("");
+    try {
+      const res = await fetch(`${apiBase}/${g.id}`, { method:"PUT", headers:{ ...authHeader, "Content-Type":"application/json" }, body:JSON.stringify({ name, description:desc }) });
+      const d = await res.json();
+      if (d.ok) { setEditing(false); onSaved && onSaved(); } else setErr(d.message || "Could not rename.");
+    } catch { setErr("Could not rename."); }
+    setBusy(false);
+  };
+
+  if (!editing) return (
+    <>
+      <div style={{ fontWeight:700, fontSize:15, display:"flex", alignItems:"center", gap:8 }}>
+        <span style={{ minWidth:0, overflow:"hidden", textOverflow:"ellipsis" }}>{g.name}</span>
+        <button onClick={start} title="Rename" style={{ background:"none", border:"none", cursor:"pointer", color:"var(--text3)", padding:2, display:"flex" }}
+          onMouseEnter={e => e.currentTarget.style.color="var(--accent)"} onMouseLeave={e => e.currentTarget.style.color="var(--text3)"}><Edit2 size={13}/></button>
+      </div>
+      {g.description && <div style={{ fontSize:12, color:"var(--text3)", marginTop:2 }}>{g.description}</div>}
+    </>
+  );
+  return (
+    <div style={{ display:"grid", gap:6, maxWidth:380 }}>
+      <input autoFocus value={name} onChange={e => setName(e.target.value)} onKeyDown={e => { if (e.key === "Enter") save(); if (e.key === "Escape") setEditing(false); }}
+        placeholder="Group name" style={{ ...S.input, padding:"7px 10px" }} onFocus={onFocus} onBlur={onBlur}/>
+      <input value={desc} onChange={e => setDesc(e.target.value)} onKeyDown={e => { if (e.key === "Enter") save(); if (e.key === "Escape") setEditing(false); }}
+        placeholder="Description (optional)" style={{ ...S.input, padding:"7px 10px", fontSize:12 }} onFocus={onFocus} onBlur={onBlur}/>
+      {err && <div style={{ fontSize:11, color:"var(--red)" }}>{err}</div>}
+      <div style={{ display:"flex", gap:6 }}>
+        <button onClick={save} disabled={busy} style={{ ...S.btnPrimary, padding:"5px 12px", fontSize:12 }}>{busy ? <Loader2 size={12} style={{ animation:"spin 1s linear infinite" }}/> : <Save size={12}/>} Save</button>
+        <button onClick={() => setEditing(false)} style={{ ...S.btnSecondary, padding:"5px 12px", fontSize:12 }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 function SenderGroupsPage({ authHeader }) {
   const [groups,      setGroups]      = useState([]);
   const [view,        setView]        = useState("list"); // list | create | detail
@@ -338,8 +383,7 @@ function SenderGroupsPage({ authHeader }) {
                   <AtSign size={18} color="var(--green)"/>
                 </div>
                 <div style={{ flex:1, minWidth:0 }}>
-                  <div style={{ fontWeight:700, fontSize:15 }}>{g.name}</div>
-                  {g.description && <div style={{ fontSize:12, color:"var(--text3)", marginTop:2 }}>{g.description}</div>}
+                  <GroupTitle g={g} apiBase={"/api/sender-groups"} authHeader={authHeader} onSaved={loadGroups}/>
                   <div style={{ fontSize:11, color:"var(--text3)", marginTop:4, fontFamily:"var(--font-mono)" }}>
                     {g.account_count} SMTP account{g.account_count !== 1 ? "s" : ""} · Created {new Date(g.created_at).toLocaleDateString()}
                   </div>
@@ -653,8 +697,7 @@ function RecipientGroupsPage({ authHeader }) {
                   <Users size={18} color="var(--accent)"/>
                 </div>
                 <div style={{ flex:1, minWidth:0 }}>
-                  <div style={{ fontWeight:700, fontSize:15 }}>{g.name}</div>
-                  {g.description && <div style={{ fontSize:12, color:"var(--text3)", marginTop:2 }}>{g.description}</div>}
+                  <GroupTitle g={g} apiBase={"/api/groups"} authHeader={authHeader} onSaved={loadGroups}/>
                   <div style={{ fontSize:11, color:"var(--text3)", marginTop:4, fontFamily:"var(--font-mono)" }}>
                     {g.member_count} member{g.member_count !== 1 ? "s" : ""} · {new Date(g.created_at).toLocaleDateString()}
                   </div>
@@ -803,6 +846,7 @@ function ComposePage({ authHeader }) {
   const [useAttachmentGroup, setUseAttachmentGroup] = useState(false);
 
   const [imapHost, setImapHost] = useState(""); // optional — where bounce notices are read from
+  const [includeUnsub, setIncludeUnsub] = useState(true); // always starts ON for every new campaign
   const [fromEmail, setFromEmail] = useState(""); // optional — visible From address (needed for Amazon SES)
 
   const [to,       setTo]       = useState("");
@@ -944,6 +988,7 @@ function ComposePage({ authHeader }) {
     }
     if (!useSenderGroup && imapHost.trim()) fd.append("imapHost", imapHost.trim());
     if (!useSenderGroup && fromEmail.trim()) fd.append("fromEmail", fromEmail.trim());
+    fd.append("unsubscribe", includeUnsub ? "true" : "false");
     fd.append("name", subject || "Campaign");
     fd.append("minDelay", min);    fd.append("maxDelay", max);
     if (useAttachmentGroup && attachmentGroupId) {
@@ -1098,6 +1143,22 @@ function ComposePage({ authHeader }) {
               ⏱ {recipientList.length} recipients · Est. {estMin}s – {estMax}s
             </div>
           )}
+        </div>
+
+        {/* Unsubscribe link */}
+        <div style={{ padding:"16px 18px", borderBottom:"1px solid var(--border)" }}>
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:8 }}><UserX size={14} color="var(--red)"/><span style={{ fontWeight:600, fontSize:13 }}>Unsubscribe link</span></div>
+            <label style={{ display:"flex", alignItems:"center", gap:6, cursor:"pointer", fontSize:12, fontWeight:700, color: includeUnsub ? "var(--green)" : "var(--text3)" }}>
+              <input type="checkbox" checked={includeUnsub} onChange={e => setIncludeUnsub(e.target.checked)} style={{ accentColor:"var(--green)" }}/>
+              {includeUnsub ? "ON" : "OFF"}
+            </label>
+          </div>
+          <div style={{ fontSize:11, color:"var(--text3)", marginTop:8, lineHeight:1.6 }}>
+            {includeUnsub
+              ? "Adds an unsubscribe link to every email. People who use it are never emailed again."
+              : "No link will be added. Addresses already on your Unsubscribed list are still skipped."}
+          </div>
         </div>
 
         {/* Attachments */}
@@ -1395,8 +1456,7 @@ function ItemGroupsPage({ authHeader, cfg }) {
                   {cfg.icon(18)}
                 </div>
                 <div style={{ flex:1, minWidth:0 }}>
-                  <div style={{ fontWeight:700, fontSize:15 }}>{g.name}</div>
-                  {g.description && <div style={{ fontSize:12, color:"var(--text3)", marginTop:2 }}>{g.description}</div>}
+                  <GroupTitle g={g} apiBase={cfg.apiBase} authHeader={authHeader} onSaved={loadGroups}/>
                   <div style={{ fontSize:11, color:"var(--text3)", marginTop:4, fontFamily:"var(--font-mono)" }}>
                     {g.item_count}/{cfg.max} {cfg.nounPlural} · {new Date(g.created_at).toLocaleDateString()}
                   </div>
@@ -1710,8 +1770,7 @@ function AttachmentGroupsPage({ authHeader }) {
                   <Paperclip size={18} color={AC}/>
                 </div>
                 <div style={{ flex:1, minWidth:0 }}>
-                  <div style={{ fontWeight:700, fontSize:15 }}>{g.name}</div>
-                  {g.description && <div style={{ fontSize:12, color:"var(--text3)", marginTop:2 }}>{g.description}</div>}
+                  <GroupTitle g={g} apiBase={"/api/attachment-groups"} authHeader={authHeader} onSaved={loadGroups}/>
                   <div style={{ fontSize:11, color:"var(--text3)", marginTop:4, fontFamily:"var(--font-mono)" }}>
                     {g.item_count}/10 files · {new Date(g.created_at).toLocaleDateString()}
                   </div>
@@ -2212,14 +2271,17 @@ const DELIVERY_UI = {
   failed:           { label:"Not sent",         color:"var(--red)",   icon:"✗" },
   rejected:         { label:"Bounced",          color:"var(--red)",   icon:"↩" },
   bounced:          { label:"Bounced",          color:"var(--red)",   icon:"↩" },
+  skipped:          { label:"Skipped",          color:"var(--text3)", icon:"⏭" },
+  complained:       { label:"Marked spam",      color:"var(--red)",   icon:"⚑" },
+  delivered:        { label:"Delivered",        color:"var(--green)", icon:"✓" },
   opened:           { label:"Opened",           color:"var(--green)", icon:"👁" },
   likely_delivered: { label:"Delivered",        color:"var(--green)", icon:"✓" },
-  awaiting:         { label:"Awaiting check",   color:"var(--amber)", icon:"⏳" },
-  unverified:       { label:"Accepted (unchecked)", color:"var(--amber)", icon:"?" },
+  awaiting:         { label:"Awaiting",         color:"var(--amber)", icon:"⏳" },
+  unverified:       { label:"Accepted (unconfirmed)", color:"var(--amber)", icon:"?" },
 };
 
 const DETAIL_FILTERS = [
-  ["all","All"], ["delivered","Delivered"], ["opened","Opened"], ["bounced","Bounced"], ["failed","Not sent"], ["unknown","Unconfirmed"],
+  ["all","All"], ["delivered","Delivered"], ["opened","Opened"], ["bounced","Bounced"], ["failed","Not sent"], ["unknown","Unconfirmed"], ["skipped","Skipped"],
 ];
 
 function CampaignDetailPage({ authHeader }) {
@@ -2313,6 +2375,11 @@ function CampaignDetailPage({ authHeader }) {
 
           <div style={{ ...S.card, marginBottom:20 }}>
             <ProgressBar sent={campaign.sent_count} failed={campaign.failed_count} total={campaign.total} color={s.color}/>
+            {stats.skipped > 0 && (
+              <div style={{ fontSize:12, color:"var(--text3)", marginTop:8 }}>
+                ⏭ {stats.skipped} unsubscribed address{stats.skipped !== 1 ? "es were" : " was"} skipped and not counted above.
+              </div>
+            )}
             <div style={{ display:"flex", gap:10, marginTop:16, flexWrap:"wrap", alignItems:"center" }}>
               {campaign.status === "running" && <button onClick={() => action("pause")}  style={{ ...S.btnSecondary }}>⏸ Pause</button>}
               {campaign.status === "paused"  && <button onClick={() => action("resume")} style={{ ...S.btnPrimary }}>▶ Resume</button>}
@@ -2328,6 +2395,7 @@ function CampaignDetailPage({ authHeader }) {
               </button>
             </div>
             <div style={{ fontSize:11.5, color:"var(--text3)", marginTop:12, display:"flex", gap:14, flexWrap:"wrap" }}>
+              <span>{campaign.unsubscribe_enabled === false ? "🔕 Unsubscribe link OFF" : "✉ Unsubscribe link ON"}</span>
               <span>🛡 {ruleText} — <span style={{ color:"var(--accent)", cursor:"pointer" }} onClick={() => navigate("/settings")}>change in Settings</span></span>
               {active && <span>Auto-refreshing — safe to close the browser.</span>}
             </div>
@@ -2353,13 +2421,13 @@ function CampaignDetailPage({ authHeader }) {
             {monitoring.length === 0 && <div style={{ fontSize:12, color:"var(--text3)" }}>Starts once the first email is sent.</div>}
             {monitoring.map(m => (
               <div key={m.sender} style={{ fontSize:12, fontFamily:"var(--font-mono)", color: m.ok ? "var(--green)" : "var(--amber)", lineHeight:1.7 }}>
-                {m.ok ? "✓" : "⚠"} {m.sender} — {m.ok ? `mailbox checked ${new Date(m.last_scan_at).toLocaleTimeString()}` : (m.error || "not checked yet (first check runs within ~2 minutes)")}
+                {m.ok ? "✓" : "⚠"} {m.sender} — {m.ok ? `${m.via === "Amazon SES events" ? "SES events received" : "mailbox checked"} ${new Date(m.last_scan_at).toLocaleTimeString()}` : (m.error || "not checked yet (first check runs within ~2 minutes)")}
               </div>
             ))}
             {unmonitored.length > 0 && (
               <div style={{ fontSize:11.5, color:"var(--text3)", marginTop:8, lineHeight:1.6 }}>
-                Where a mailbox can't be checked, bounces that arrive later are invisible, so those emails show as “Accepted (unchecked)” — not “Delivered”.
-                Fix: enable IMAP for that mailbox and/or set its IMAP host.
+                Where a sender can't be checked, later bounces are invisible, so those emails stay “Accepted (unconfirmed)” instead of “Delivered”.
+                Mailbox senders: enable IMAP / set the IMAP host. Amazon SES: turn on SES events (see Settings).
               </div>
             )}
           </div>
@@ -2411,6 +2479,7 @@ function SettingsPage({ authHeader }) {
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [msg, setMsg] = useState(null);
+  const [sesUrl, setSesUrl] = useState("");
   const bodyRef = useRef();
 
   const showMsg = (type, text) => { setMsg({ type, text }); setTimeout(() => setMsg(null), 5000); };
@@ -2420,6 +2489,7 @@ function SettingsPage({ authHeader }) {
     fetch("/api/settings", { headers: authHeader }).then(r => r.json()).then(d => {
       if (d.ok) { setForm(d.settings); setDefaults(d.defaults); setAccountEmail(d.accountEmail); }
     }).catch(() => showMsg("error", "Failed to load settings."));
+    fetch("/api/settings/ses-webhook", { headers: authHeader }).then(r => r.json()).then(d => { if (d.ok) setSesUrl(d.url); }).catch(() => {});
   }, []);
 
   const send = async (url, method) => {
@@ -2512,6 +2582,221 @@ function SettingsPage({ authHeader }) {
             <button onClick={() => setForm(f => ({ ...f, alert_subject: defaults.alert_subject, alert_body: defaults.alert_body }))} style={S.btnSecondary}><RefreshCw size={13}/> Reset template</button>
           </div>
           <div style={{ fontSize:11, color:"var(--text3)", marginTop:10 }}>The test uses the template as shown above (even if unsaved) with sample data.</div>
+        </div>
+      </div>
+
+      <div style={{ ...S.card, marginTop:20 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:6 }}>
+          <Inbox size={15} color="var(--green)"/><span style={{ fontWeight:700, fontSize:15 }}>Amazon SES delivery events</span>
+        </div>
+        <div style={{ fontSize:12.5, color:"var(--text2)", lineHeight:1.7, marginBottom:14 }}>
+          SES has no mailbox to read, so by default its emails stay “Accepted (unconfirmed)”. Connect SES events and every email gets a real status:
+          <b> Delivered</b> (the recipient's server accepted it), <b>Bounced</b> (with the reason, including mailbox disabled) or <b>Marked as spam</b>.
+          Bounces also feed the auto-pause rule, and people who mark you as spam are added to the Unsubscribed list.
+        </div>
+        <Field label="Your events URL (paste it into AWS as the endpoint)">
+          <div style={{ display:"flex", gap:8 }}>
+            <input readOnly value={sesUrl} onFocus={e => e.target.select()} style={{ ...S.input, fontFamily:"var(--font-mono)", fontSize:12 }}/>
+            <button onClick={() => { navigator.clipboard && navigator.clipboard.writeText(sesUrl).then(() => showMsg("success", "URL copied."), () => showMsg("error", "Select the text and copy it manually.")); }} style={S.btnSecondary}><Copy size={13}/> Copy</button>
+          </div>
+        </Field>
+        <div style={{ fontSize:12, color:"var(--text2)", lineHeight:1.9 }}>
+          <b>One-time setup in AWS</b> (use the same region as your SES account):<br/>
+          1. <b>SES → Configuration sets → Create set</b> (any name, e.g. <span style={{ fontFamily:"var(--font-mono)" }}>mailblast</span>).<br/>
+          2. In that set: <b>Event destinations → Add destination → Amazon SNS</b>. Tick <b>Delivery, Bounce, Complaint</b> and create a new SNS topic.<br/>
+          3. <b>SES → Verified identities →</b> your domain <b>→ Configuration set tab →</b> set it as the <b>default configuration set</b>.<br/>
+          4. <b>SNS → Topics →</b> your topic <b>→ Create subscription</b>: Protocol <b>HTTPS</b> (or HTTP), Endpoint = the URL above. It confirms itself within a few seconds.<br/>
+          Open this page through your https domain, so the URL above is the https one. Only emails sent <i>after</i> setup get statuses.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── UNSUBSCRIBED PEOPLE ──────────────────────────────────────────────────────
+const UNSUB_SOURCE = {
+  link:        { label:"Clicked link",     color:"var(--accent)" },
+  "one-click": { label:"One-click (mail app)", color:"var(--accent)" },
+  manual:      { label:"Added manually",   color:"var(--text2)" },
+  complaint:   { label:"Spam complaint",   color:"var(--red)" },
+};
+
+function UnsubscribesPage({ authHeader }) {
+  const [rows, setRows]       = useState([]);
+  const [total, setTotal]     = useState(0);
+  const [overall, setOverall] = useState(0);
+  const [page, setPage]       = useState(1);
+  const [search, setSearch]   = useState("");
+  const [query, setQuery]     = useState("");
+  const [selected, setSelected] = useState(new Set());
+  const [editId, setEditId]   = useState(null);
+  const [editEmail, setEditEmail] = useState("");
+  const [editNote, setEditNote]   = useState("");
+  const [addText, setAddText] = useState("");
+  const [addNote, setAddNote] = useState("");
+  const [msg, setMsg]         = useState(null);
+  const [busy, setBusy]       = useState("");
+  const LIMIT = 50;
+
+  const showMsg = (type, text) => { setMsg({ type, text }); setTimeout(() => setMsg(null), 4000); };
+  const json = { ...authHeader, "Content-Type":"application/json" };
+
+  const load = async () => {
+    try {
+      const res = await fetch(`/api/unsubscribes?search=${encodeURIComponent(query)}&page=${page}&limit=${LIMIT}`, { headers: authHeader });
+      const d = await res.json();
+      if (d.ok) { setRows(d.rows); setTotal(d.total); setOverall(d.overall); }
+    } catch { showMsg("error", "Failed to load."); }
+  };
+  useEffect(() => { load(); }, [query, page]);
+  // search as you type (small delay so we don't query on every keystroke)
+  useEffect(() => { const t = setTimeout(() => { setPage(1); setQuery(search.trim()); }, 300); return () => clearTimeout(t); }, [search]);
+
+  const add = async () => {
+    if (!addText.trim()) return showMsg("error", "Enter at least one email address.");
+    setBusy("add");
+    try {
+      const d = await (await fetch("/api/unsubscribes", { method:"POST", headers:json, body:JSON.stringify({ emails:addText, note:addNote }) })).json();
+      showMsg(d.ok ? "success" : "error", d.message);
+      if (d.ok) { setAddText(""); setAddNote(""); load(); }
+    } catch { showMsg("error", "Failed to add."); }
+    setBusy("");
+  };
+
+  const saveEdit = async () => {
+    try {
+      const d = await (await fetch(`/api/unsubscribes/${editId}`, { method:"PUT", headers:json, body:JSON.stringify({ email:editEmail, note:editNote }) })).json();
+      showMsg(d.ok ? "success" : "error", d.message);
+      if (d.ok) { setEditId(null); load(); }
+    } catch { showMsg("error", "Failed to save."); }
+  };
+
+  const remove = async (r) => {
+    if (!window.confirm(`Remove ${r.email} from the unsubscribe list?\n\nThis address will be able to receive your emails again.`)) return;
+    const d = await (await fetch(`/api/unsubscribes/${r.id}`, { method:"DELETE", headers:authHeader })).json();
+    showMsg(d.ok ? "success" : "error", d.message);
+    setSelected(s => { const n = new Set(s); n.delete(r.id); return n; });
+    load();
+  };
+
+  const removeSelected = async () => {
+    if (selected.size === 0) return;
+    if (!window.confirm(`Remove ${selected.size} address(es) from the unsubscribe list?\n\nThey will be able to receive your emails again.`)) return;
+    const d = await (await fetch("/api/unsubscribes/bulk-delete", { method:"POST", headers:json, body:JSON.stringify({ ids:[...selected] }) })).json();
+    showMsg(d.ok ? "success" : "error", d.message);
+    setSelected(new Set()); load();
+  };
+
+  const download = async () => {
+    setBusy("dl");
+    try { await downloadWithAuth(`/api/unsubscribes/export?search=${encodeURIComponent(query)}`, authHeader, "unsubscribed.xlsx"); }
+    catch (e) { showMsg("error", e.message); }
+    setBusy("");
+  };
+
+  const allOnPage = rows.length > 0 && rows.every(r => selected.has(r.id));
+  const toggleAll = () => setSelected(s => { const n = new Set(s); rows.forEach(r => allOnPage ? n.delete(r.id) : n.add(r.id)); return n; });
+  const pages = Math.max(1, Math.ceil(total / LIMIT));
+
+  return (
+    <div style={{ flex:1, padding:"28px 32px", overflowY:"auto" }}>
+      <Toast msg={msg}/>
+      <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:6 }}>
+        <div style={{ fontWeight:800, fontSize:22, letterSpacing:"-0.5px", flex:1 }}>Unsubscribed</div>
+        <button onClick={download} disabled={busy==="dl" || total === 0} style={S.btnPrimary}>
+          {busy==="dl" ? <Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> : <FileSpreadsheet size={15}/>} Download report{query ? " (filtered)" : ""}
+        </button>
+      </div>
+      <div style={{ color:"var(--text3)", fontSize:13, marginBottom:22 }}>
+        {overall} address{overall !== 1 ? "es" : ""} will never be emailed again — every campaign skips them automatically.
+      </div>
+
+      <div style={{ display:"grid", gridTemplateColumns:"minmax(280px, 340px) 1fr", gap:20, alignItems:"start" }}>
+        <div style={S.card}>
+          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:12 }}><UserX size={15} color="var(--red)"/><span style={{ fontWeight:700, fontSize:14 }}>Add manually</span></div>
+          <Field label="Email addresses">
+            <textarea value={addText} onChange={e => setAddText(e.target.value)} placeholder={"one@example.com\ntwo@example.com"} style={{ ...S.textarea, minHeight:110 }} onFocus={onFocus} onBlur={onBlur}/>
+          </Field>
+          <Field label="Note (optional)">
+            <input value={addNote} onChange={e => setAddNote(e.target.value)} placeholder="e.g. asked by phone" style={S.input} onFocus={onFocus} onBlur={onBlur}/>
+          </Field>
+          <button onClick={add} disabled={busy==="add"} style={{ ...S.btnPrimary, width:"100%" }}>{busy==="add" ? <Loader2 size={14} style={{ animation:"spin 1s linear infinite" }}/> : <Plus size={14}/>} Add to list</button>
+          <div style={{ fontSize:11, color:"var(--text3)", marginTop:10, lineHeight:1.6 }}>
+            People who click the unsubscribe link in your emails (or mark one as spam) are added here automatically.
+          </div>
+        </div>
+
+        <div style={{ ...S.card, padding:0, overflow:"hidden" }}>
+          <div style={{ padding:"14px 18px", borderBottom:"1px solid var(--border)", display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+            <div style={{ position:"relative", flex:1, minWidth:200 }}>
+              <Search size={14} color="var(--text3)" style={{ position:"absolute", left:12, top:12 }}/>
+              <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search email or note..." style={{ ...S.input, paddingLeft:34 }} onFocus={onFocus} onBlur={onBlur}/>
+            </div>
+            <span style={{ ...S.chip, background:"var(--surface2)", color:"var(--text2)" }}>{total} {query ? "found" : "total"}</span>
+            {selected.size > 0 && (
+              <button onClick={removeSelected} style={{ ...S.btnSecondary, borderColor:"var(--red)", color:"var(--red)" }}><Trash2 size={13}/> Remove selected ({selected.size})</button>
+            )}
+          </div>
+
+          {rows.length === 0 ? (
+            <div style={{ padding:"48px 20px", textAlign:"center", color:"var(--text3)", fontSize:13 }}>{query ? "No matches." : "Nobody has unsubscribed yet."}</div>
+          ) : (
+            <div style={{ overflowX:"auto" }}>
+              <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12.5 }}>
+                <thead>
+                  <tr style={{ color:"var(--text3)", textAlign:"left", fontSize:11, textTransform:"uppercase", letterSpacing:"0.05em" }}>
+                    <th style={{ padding:"10px 12px 10px 18px", width:28 }}><input type="checkbox" checked={allOnPage} onChange={toggleAll} style={{ accentColor:"var(--accent)" }}/></th>
+                    <th style={{ padding:"10px 8px" }}>Email</th><th style={{ padding:"10px 8px" }}>How</th>
+                    <th style={{ padding:"10px 8px" }}>Campaign</th><th style={{ padding:"10px 8px" }}>When</th><th style={{ padding:"10px 8px" }}>Note</th>
+                    <th style={{ padding:"10px 18px 10px 8px", width:90 }}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map(r => {
+                    const src = UNSUB_SOURCE[r.source] || { label:r.source, color:"var(--text2)" };
+                    const editing = editId === r.id;
+                    return (
+                      <tr key={r.id} style={{ borderTop:"1px solid var(--border)" }}>
+                        <td style={{ padding:"9px 12px 9px 18px" }}><input type="checkbox" checked={selected.has(r.id)} onChange={() => setSelected(s => { const n = new Set(s); n.has(r.id) ? n.delete(r.id) : n.add(r.id); return n; })} style={{ accentColor:"var(--accent)" }}/></td>
+                        <td style={{ padding:"9px 8px", fontFamily:"var(--font-mono)" }}>
+                          {editing ? <input value={editEmail} onChange={e => setEditEmail(e.target.value)} style={{ ...S.input, padding:"6px 8px", minWidth:200 }} onFocus={onFocus} onBlur={onBlur}/> : r.email}
+                        </td>
+                        <td style={{ padding:"9px 8px" }}><span style={{ color:src.color, fontWeight:600 }}>{src.label}</span></td>
+                        <td style={{ padding:"9px 8px", color:"var(--text3)", maxWidth:160, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{r.campaign_name || "—"}</td>
+                        <td style={{ padding:"9px 8px", color:"var(--text3)", whiteSpace:"nowrap" }}>{new Date(r.created_at).toLocaleString()}</td>
+                        <td style={{ padding:"9px 8px", color:"var(--text2)" }}>
+                          {editing ? <input value={editNote} onChange={e => setEditNote(e.target.value)} style={{ ...S.input, padding:"6px 8px", minWidth:140 }} onFocus={onFocus} onBlur={onBlur}/> : (r.note || "")}
+                        </td>
+                        <td style={{ padding:"9px 18px 9px 8px", whiteSpace:"nowrap", textAlign:"right" }}>
+                          {editing ? (
+                            <>
+                              <button onClick={saveEdit} title="Save" style={{ ...S.btnSecondary, padding:"5px 8px", marginRight:4, borderColor:"var(--green)", color:"var(--green)" }}><CheckCircle size={13}/></button>
+                              <button onClick={() => setEditId(null)} title="Cancel" style={{ ...S.btnSecondary, padding:"5px 8px" }}><X size={13}/></button>
+                            </>
+                          ) : (
+                            <>
+                              <button onClick={() => { setEditId(r.id); setEditEmail(r.email); setEditNote(r.note || ""); }} title="Edit" style={{ ...S.btnSecondary, padding:"5px 8px", marginRight:4 }}><Edit2 size={13}/></button>
+                              <button onClick={() => remove(r)} title="Remove from list" style={{ ...S.btnSecondary, padding:"5px 8px" }}
+                                onMouseEnter={e => { e.currentTarget.style.borderColor="var(--red)"; e.currentTarget.style.color="var(--red)"; }}
+                                onMouseLeave={e => { e.currentTarget.style.borderColor="var(--border2)"; e.currentTarget.style.color="var(--text2)"; }}><Trash2 size={13}/></button>
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {pages > 1 && (
+            <div style={{ padding:"12px 18px", borderTop:"1px solid var(--border)", display:"flex", alignItems:"center", gap:10, justifyContent:"flex-end" }}>
+              <button disabled={page <= 1} onClick={() => setPage(p => p - 1)} style={{ ...S.btnSecondary, padding:"5px 12px", opacity: page <= 1 ? 0.4 : 1 }}>Prev</button>
+              <span style={{ fontSize:12, color:"var(--text3)" }}>Page {page} of {pages}</span>
+              <button disabled={page >= pages} onClick={() => setPage(p => p + 1)} style={{ ...S.btnSecondary, padding:"5px 12px", opacity: page >= pages ? 0.4 : 1 }}>Next</button>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -2955,6 +3240,7 @@ function MainApp({ user, token, onLogout }) {
     { to:"/recipient-groups", label:"Recipient Groups",  icon:<Users size={13}/> },
     { to:"/email-verifier",   label:"Email Verifier",    icon:<ShieldCheck size={13}/> },
     { to:"/tracking",         label:"Tracking",          icon:<Activity size={13}/> },
+    { to:"/unsubscribed",     label:"Unsubscribed",      icon:<UserX size={13}/> },
     { to:"/settings",         label:"Settings",          icon:<Settings size={13}/> },
   ];
 
@@ -2998,6 +3284,7 @@ function MainApp({ user, token, onLogout }) {
         <Route path="/campaigns/:id"    element={<CampaignDetailPage authHeader={authHeader}/>}/>
         <Route path="/subject-groups"   element={<SubjectGroupsPage authHeader={authHeader}/>}/>
         <Route path="/body-groups"      element={<BodyGroupsPage authHeader={authHeader}/>}/>
+        <Route path="/unsubscribed"     element={<UnsubscribesPage authHeader={authHeader}/>}/>
         <Route path="/settings"         element={<SettingsPage authHeader={authHeader}/>}/>
         <Route path="/attachment-groups" element={<AttachmentGroupsPage authHeader={authHeader}/>}/>
         <Route path="/sender-groups"    element={<SenderGroupsPage authHeader={authHeader}/>}/>

@@ -285,6 +285,23 @@ async function initDB() {
     CREATE INDEX IF NOT EXISTS idx_camp_recipients_tracking ON campaign_recipients(tracking_id);
     CREATE INDEX IF NOT EXISTS idx_camp_recipients_bounce   ON campaign_recipients(campaign_id, bounce_type);
 
+    -- ── v6: Unsubscribe list, delivery confirmation, complaints ────────────────
+    CREATE TABLE IF NOT EXISTS unsubscribes (
+      id          SERIAL PRIMARY KEY,
+      user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      email       VARCHAR(255) NOT NULL,
+      source      VARCHAR(20) DEFAULT 'manual',   -- link | one-click | manual | complaint
+      campaign_id INTEGER,
+      note        TEXT,
+      created_at  TIMESTAMP DEFAULT NOW(),
+      UNIQUE (user_id, email)
+    );
+    CREATE INDEX IF NOT EXISTS idx_unsubscribes_user ON unsubscribes(user_id);
+    ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS unsubscribe_enabled BOOLEAN DEFAULT TRUE;
+    -- Set by Amazon SES delivery events (webhook): hard confirmation from the receiving server.
+    ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS delivered_at  TIMESTAMP;
+    ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS complained_at TIMESTAMP;
+
     -- Bounce-mailbox scanner state: one row per sender mailbox we read over IMAP.
     CREATE TABLE IF NOT EXISTS mailbox_scan_state (
       id            SERIAL PRIMARY KEY,

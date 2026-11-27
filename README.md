@@ -250,6 +250,27 @@ SES works as an ordinary SMTP account — enter it on Compose or in a Sender Gro
 SES has no mailbox to read, so bounces that arrive *after* sending are not visible: those emails show as
 "Accepted (bounce check unavailable)", while refusals at send time are reported as bounced.
 
+### Unsubscribe (v6)
+Every email gets an unsubscribe link plus `List-Unsubscribe` / one-click headers (Gmail & Yahoo expect them). The
+**Unsubscribe link** switch on Compose is ON for every new campaign. Opening the link shows a confirm button (mail
+scanners pre-open links, so a plain GET never unsubscribes anyone); confirming — or a mail app's one-click — adds the
+address to your **Unsubscribed** list. Addresses on that list are skipped by every campaign (also if they unsubscribe
+while a campaign is running), even when the link switch is off. The **Unsubscribed** page lets you search, add, edit,
+remove and download the list. People who mark an SES email as spam are added automatically.
+Set `PUBLIC_URL=https://your-domain` in `.env` so links and the tracking pixel always use your https domain.
+
+### Rename groups
+Subject, Body, Sender, Attachment and Recipient groups all have a pencil icon next to the name.
+
+### Mailbox Disabled sheet
+The campaign report has a **Mailbox Disabled** sheet: bounces where the account exists but is disabled / suspended /
+discontinued (detected from the code and the receiving server's own wording, also for older campaigns).
+
+### Amazon SES delivery events (optional, recommended)
+SES has no mailbox to read, so its emails stay "Accepted (unconfirmed)". **Settings → Amazon SES delivery events** shows a
+URL to give to AWS (SNS subscription). Once connected, each email becomes *Delivered (confirmed)*, *Bounced* (with
+reason) or *Marked as spam*, and SES bounces feed the 3-in-a-row auto-pause.
+
 ---
 
 ## License

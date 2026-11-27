@@ -84,7 +84,7 @@ function looksLikeBounce(envelope, bodyStructure) {
 }
 
 // ── Recording a bounce ────────────────────────────────────────────────────────
-async function recordBounce(rowId, entry, bodyText, when) {
+async function recordBounce(rowId, entry, bodyText, when, source = "dsn") {
   const failed = entry ? (entry.action ? entry.action === "failed" : /^[45]/.test(entry.status)) : true;
   if (!failed) return null;
   const status = entry && entry.status;
@@ -93,10 +93,10 @@ async function recordBounce(rowId, entry, bodyText, when) {
   const c = classifyBounce({ code: status || null, text, permanent });
   const r = await pool.query(
     `UPDATE campaign_recipients
-        SET bounce_type=$1, bounce_source='dsn', bounce_code=$2, bounce_reason=$3, bounce_detail=$4, bounced_at=$5
+        SET bounce_type=$1, bounce_source=$7, bounce_code=$2, bounce_reason=$3, bounce_detail=$4, bounced_at=$5
       WHERE id=$6 AND bounce_type IS NULL
       RETURNING id, campaign_id, email, from_addr`,
-    [c.type, c.code, c.reason, String(text).replace(/\s+/g, " ").slice(0, 400), when || new Date(), rowId]
+    [c.type, c.code, c.reason, String(text).replace(/\s+/g, " ").slice(0, 400), when || new Date(), rowId, source]
   );
   return r.rows[0] || null;
 }
@@ -251,12 +251,17 @@ async function scanMailbox(mb, result) {
             if (looksLikeBounce(msg.envelope, msg.bodyStructure) && (!msg.size || msg.size <= MAX_SOURCE_BYTES)) candidates.push(msg.uid);
           }
           for (const uid of candidates) {
-            const full = await client.fetchOne(String(uid), { source: true }, { uid: true });
-            if (!full || !full.source) continue;
-            result.examined++;
-            const parsedMsg = await parseBounceMessage(full.source);
-            const rows = await applyBounce(parsedMsg, mb);
-            touched.push(...rows);
+            // One unreadable notice must never block the rest of the mailbox: log it and move on.
+            try {
+              const full = await client.fetchOne(String(uid), { source: true }, { uid: true });
+              if (!full || !full.source) continue;
+              result.examined++;
+              const parsedMsg = await parseBounceMessage(full.source);
+              const rows = await applyBounce(parsedMsg, mb);
+              touched.push(...rows);
+            } catch (msgErr) {
+              console.error(`📭 skipped one notice (uid ${uid}) in ${mb.username}: ${msgErr.message}`);
+            }
           }
           lastUid = chunk[chunk.length - 1];
           await saveState(mb, folder, { uidValidity, lastUid, error: null, scanned: false });
@@ -313,4 +318,4 @@ function start() {
   console.log(`📭 Bounce scanner on — every ${SCAN_INTERVAL_SEC}s, watching campaigns for ${WATCH_HOURS}h after they finish.`);
 }
 
-module.exports = { start, scan, parseBounceMessage, parseDeliveryStatus, looksLikeBounce, applyBounce, WATCH_HOURS };
+module.exports = { start, scan, recordBounce, parseBounceMessage, parseDeliveryStatus, looksLikeBounce, applyBounce, WATCH_HOURS };
